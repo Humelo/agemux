@@ -1265,6 +1265,9 @@ func validateCodexAccountName(name string) error {
 	if name == "json" {
 		return fmt.Errorf("Codex account name %q is reserved", name)
 	}
+	if strings.HasPrefix(name, "backup-") {
+		return fmt.Errorf("Codex account name prefix %q is reserved", "backup-")
+	}
 	if !nameRE.MatchString(name) {
 		return fmt.Errorf("Codex account name %q must use letters, numbers, dot, dash, underscore, plus, at, or colon", name)
 	}
@@ -1324,6 +1327,9 @@ func listCodexAccounts(includeUsage bool) ([]codexAccount, error) {
 		base := filepath.Base(path)
 		name := strings.TrimSuffix(strings.TrimPrefix(base, "auth."), ".json")
 		if name == "" || name == "json" {
+			continue
+		}
+		if strings.HasPrefix(name, "backup-") {
 			continue
 		}
 		content, err := os.ReadFile(path)
@@ -1561,7 +1567,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.3")
+	req.Header.Set("User-Agent", "agemux/0.1.4")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

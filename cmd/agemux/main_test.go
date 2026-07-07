@@ -137,6 +137,31 @@ func TestCodexAccountsListAndSwitchUseCodeHome(t *testing.T) {
 	}
 }
 
+func TestCodexAccountsListSkipsBackupAuthFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	alpha := fakeCodexAuth("alpha@example.invalid")
+	backup := fakeCodexAuth("backup@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, "auth.alpha.json"), []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.backup-20260707-131003.json"), []byte(backup), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts, err := listCodexAccounts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].Name != "alpha" {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+}
+
 func TestSwitchCodexAccountBacksUpUntrackedActiveAuth(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
@@ -295,6 +320,9 @@ func TestCodexAccountNameHelpers(t *testing.T) {
 	}
 	if err := validateCodexAccountName("../bad"); err == nil {
 		t.Fatal("expected invalid account name")
+	}
+	if err := validateCodexAccountName("backup-20260707"); err == nil {
+		t.Fatal("expected backup account name to be reserved")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "auth.tools.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)

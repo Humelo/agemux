@@ -1,7 +1,7 @@
 class Agemux < Formula
   desc "Persistent Codex and Claude session picker plus Claude account switcher"
   homepage "https://github.com/Humelo/agemux"
-  url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.3.tar.gz"
+  url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.4.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "MIT"
 
@@ -14,6 +14,6 @@ class Agemux < Formula
 
   test do
     assert_match "agemux", shell_output("#{bin}/agemux --help")
-    assert_match "Claude accounts 0.1.3", shell_output("#{bin}/agemux claude-accounts version")
+    assert_match "Claude accounts 0.1.4", shell_output("#{bin}/agemux claude-accounts version")
   end
 end

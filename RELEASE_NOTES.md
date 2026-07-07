@@ -1,21 +1,19 @@
-# Agent Multiplexer v0.1.3
+# Agent Multiplexer v0.1.4
 
-Account management follow-up release.
+Codex account backup visibility fix.
 
-- Adds Codex account management actions: `current`, `change`, `login`, `status`, `delete`, and `refresh`.
-- Adds `l`, `s`, `r`, and `d` actions to the Codex account picker for login/update, status, usage refresh, and delete.
-- Standardizes account deletion on `d delete` in both Codex and Claude account pickers while keeping `k`/`x` as compatibility aliases.
-- Adds `agemux claude-accounts delete <selector>`.
-- Keeps deletion local-only: it removes the local account slot/config mapping and does not revoke provider-side tokens.
+- Hides internal `auth.backup-*.json` safety backups from the Codex account picker and CLI list.
+- Reserves the `backup-` Codex account name prefix so future account slots cannot collide with internal backup files.
+- Keeps the backup safety behavior itself: when switching away from an unmanaged active `auth.json`, Agent Multiplexer still preserves it locally instead of overwriting it silently.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.4/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.3/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.4/scripts/install.sh | bash -s -- --with-codex-lb
 ```

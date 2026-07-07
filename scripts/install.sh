@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${AGEMUX_REPO:-Humelo/agemux}"
-REF="${AGEMUX_REF:-v0.1.3}"
+REF="${AGEMUX_REF:-v0.1.4}"
 PREFIX="${AGEMUX_PREFIX:-$HOME/.local}"
 BIN_DIR="${AGEMUX_BIN_DIR:-$PREFIX/bin}"
 INSTALL_CLAUDE_SHIM=0
