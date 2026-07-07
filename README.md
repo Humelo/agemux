@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.2/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.3/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.2/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.3/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.2/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.3/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.2/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.3/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -46,6 +46,8 @@ agemux claude
 agemux claude-new
 agemux codex-accounts
 agemux codex-accounts new
+agemux codex-accounts change 2
+agemux codex-accounts delete 2
 agemux claude-accounts
 agemux claude-accounts list
 agemux list
@@ -68,11 +70,18 @@ Codex account switcher:
 ```sh
 agemux codex-accounts
 agemux codex-accounts list
+agemux codex-accounts current
+agemux codex-accounts change 2
 agemux codex-accounts new
 agemux codex-accounts new work
+agemux codex-accounts login work
+agemux codex-accounts status work
+agemux codex-accounts delete work
 ```
 
 `+ Add Codex account` starts `codex login` in an isolated temporary `CODEX_HOME`, then saves the result as `~/.codex/auth.<name>.json` and switches the active `~/.codex/auth.json` to it.
+
+Inside the Codex account picker, use `Enter` to switch, `n` to add, `l` to login/update, `s` for status, `r` to refresh usage, and `d` to delete a local account slot.
 
 Claude account switcher:
 
@@ -82,9 +91,13 @@ agemux claude-accounts list
 agemux claude-accounts change 2
 agemux claude-accounts current
 agemux claude-accounts new
+agemux claude-accounts login 2
+agemux claude-accounts status 2
+agemux claude-accounts delete 2
 ```
 
 The Claude account picker also includes a `+ Add Claude account` row for creating a new account slot and starting login.
+Inside the Claude account picker, use `Enter` to switch, `n` to add, `l` to login, `s` for status, `r` to refresh usage, and `d` to delete a local account slot.
 
 By default, `agemux claude-accounts change` changes the current account for Claude runs launched through Agent Multiplexer and for a `claude` shim installed with:
 

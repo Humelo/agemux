@@ -62,6 +62,64 @@ func TestClaudePickerRowsIncludeAddAccountAction(t *testing.T) {
 	}
 }
 
+func TestCommandDeleteRemovesAccountAndPersistsNextCurrent(t *testing.T) {
+	restore := useTestClaudeAccountsDataDir(t)
+	defer restore()
+
+	first := account{ID: "first", ConfigDir: filepath.Join(home, ".claude-first")}
+	second := account{ID: "second", ConfigDir: filepath.Join(home, ".claude-second")}
+	if err := saveJSON(accountsFile, accountsDisk{Version: 2, Accounts: []account{first, second}}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCurrentAccount(first); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := commandDelete([]string{"1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts, err := getAccounts(false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || resolvedPath(accounts[0].ConfigDir) != resolvedPath(second.ConfigDir) {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+	if current := accountByID(currentAccountID(accounts), accounts); current == nil || resolvedPath(current.ConfigDir) != resolvedPath(second.ConfigDir) {
+		t.Fatalf("current account = %#v", current)
+	}
+}
+
+func useTestClaudeAccountsDataDir(t *testing.T) func() {
+	t.Helper()
+	oldHome := home
+	oldDataDir := dataDir
+	oldAccountsFile := accountsFile
+	oldAuthFile := authFile
+	oldQuotasFile := quotasFile
+	oldStateFile := stateFile
+	oldLockFile := lockFile
+
+	home = t.TempDir()
+	dataDir = t.TempDir()
+	accountsFile = filepath.Join(dataDir, "accounts.json")
+	authFile = filepath.Join(dataDir, "auth.json")
+	quotasFile = filepath.Join(dataDir, "quotas.json")
+	stateFile = filepath.Join(dataDir, "state.json")
+	lockFile = filepath.Join(dataDir, "claude-accounts.lock")
+
+	return func() {
+		home = oldHome
+		dataDir = oldDataDir
+		accountsFile = oldAccountsFile
+		authFile = oldAuthFile
+		quotasFile = oldQuotasFile
+		stateFile = oldStateFile
+		lockFile = oldLockFile
+	}
+}
+
 func TestInstallShimMigratesLegacyClswReal(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("shell shim test is POSIX-specific")

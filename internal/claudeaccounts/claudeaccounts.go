@@ -24,7 +24,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.2"
+const version = "0.1.3"
 
 var (
 	home         = homeDir()
@@ -139,6 +139,8 @@ func RunMain(argv []string) error {
 		return commandLoginOrStatus("login", rest)
 	case "status":
 		return commandLoginOrStatus("status", rest)
+	case "delete", "remove", "rm":
+		return commandDelete(rest)
 	case "add":
 		return commandAdd(rest)
 	case "init":
@@ -187,6 +189,7 @@ func printHelp() {
   agemux claude-accounts new                     create a new account slot and start login
   agemux claude-accounts login [selector]        log in to an account
   agemux claude-accounts status [selector]       show Claude auth status for an account
+  agemux claude-accounts delete <selector>       remove an account from local management
   agemux claude-accounts add <config-dir>        add a Claude config dir
   agemux claude-accounts init                    discover accounts and install statusline hooks
   agemux claude-accounts install-statusline      install statusline hooks for known accounts
@@ -612,6 +615,17 @@ func removeAccount(acc account) error {
 		}
 		return nil
 	})
+}
+
+func persistResolvedCurrentAccount(accounts []account) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	current := accountByID(currentAccountID(accounts), accounts)
+	if current == nil {
+		return nil
+	}
+	return setCurrentAccount(*current)
 }
 
 func sortedKeys(values map[string]bool) []string {
@@ -1423,7 +1437,7 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 			}
 		case key == "r":
 			refreshAll(accounts, true, true, nil)
-		case key == "k" || key == "x":
+		case key == "d" || key == "k" || key == "x":
 			if selected == 0 {
 				continue
 			}
@@ -1436,6 +1450,9 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 				accounts, reloadErr = getAccounts(false, false)
 				if reloadErr != nil {
 					return pickerAction{}, reloadErr
+				}
+				if err := persistResolvedCurrentAccount(accounts); err != nil {
+					return pickerAction{}, err
 				}
 				if len(accounts) == 0 {
 					return pickerAction{}, nil
@@ -1460,7 +1477,7 @@ func drawPicker(rows []tableRow, selected int, mode string, accountCount int) {
 	}
 	fmt.Print("\033[H\033[2J")
 	tuiLine(bold(clipDisplay("Claude accounts", width-1)))
-	tuiLine(dim(clipDisplay("Up/Down move  Enter select  n new  l login  s status  r refresh  k delete  q/Esc back", width-1)))
+	tuiLine(dim(clipDisplay("Up/Down move  Enter select  n new  l login  s status  r refresh  d delete  q/Esc back", width-1)))
 	tuiLine(strings.Repeat("-", min(width-1, 1000)))
 	visible := max(1, (height-5)/4)
 	offset := 0
@@ -1612,6 +1629,43 @@ func commandChange(rest []string) error {
 		return err
 	}
 	fmt.Printf("current Claude account: %s\n", displayAccountHint(*acc, auth))
+	return nil
+}
+
+func commandDelete(rest []string) error {
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: agemux claude-accounts delete <selector>")
+	}
+	accounts, err := getAccounts(false, false)
+	if err != nil {
+		return err
+	}
+	auth, _ := loadMap(authFile)
+	acc, err := resolveSelector(rest, accounts, auth, false)
+	if err != nil {
+		return err
+	}
+	if acc == nil {
+		return fmt.Errorf("no Claude account configured")
+	}
+	label := displayAccountHint(*acc, auth)
+	if err := removeAccount(*acc); err != nil {
+		return err
+	}
+	remaining, err := getAccounts(false, false)
+	if err != nil {
+		return err
+	}
+	if err := persistResolvedCurrentAccount(remaining); err != nil {
+		return err
+	}
+	fmt.Printf("deleted Claude account: %s\n", label)
+	current := accountByID(currentAccountID(remaining), remaining)
+	if current != nil {
+		fmt.Printf("current Claude account: %s\n", displayAccountHint(*current, auth))
+	} else {
+		fmt.Println("no current Claude account")
+	}
 	return nil
 }
 

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -144,6 +145,8 @@ func usage(prog string) {
   %[1]s claude-new       new shpool session running fresh Claude
   %[1]s codex-accounts   open the Codex account switcher
   %[1]s codex-accounts new [name]
+  %[1]s codex-accounts change SELECTOR
+  %[1]s codex-accounts delete SELECTOR
   %[1]s claude-accounts  open the Claude account switcher
   %[1]s list             list live agemux shpool sessions
   %[1]s attach NAME      attach to a live session
@@ -723,12 +726,90 @@ func codexAccountsCommand(args []string) error {
 		return codexAccountsInteractive()
 	}
 	switch args[0] {
+	case "current":
+		accounts, err := listCodexAccounts(false)
+		if err != nil {
+			return err
+		}
+		acc := currentCodexAccount(accounts)
+		if acc == nil {
+			fmt.Println("no current Codex account")
+			return nil
+		}
+		fmt.Printf("current Codex account: %s\n", codexAccountLabel(*acc))
+		return nil
 	case "new":
 		name := ""
 		if len(args) > 1 {
 			name = args[1]
 		}
 		return commandNewCodexAccount(name)
+	case "change", "select", "use":
+		accounts, err := listCodexAccounts(false)
+		if err != nil {
+			return err
+		}
+		acc, err := resolveCodexAccountSelector(accounts, args[1:])
+		if err != nil {
+			return err
+		}
+		if acc == nil {
+			return fmt.Errorf("no Codex account configured")
+		}
+		if err := switchCodexAccount(*acc); err != nil {
+			return err
+		}
+		fmt.Printf("current Codex account: %s\n", codexAccountLabel(*acc))
+		return nil
+	case "delete", "remove", "rm":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: agemux codex-accounts delete SELECTOR")
+		}
+		accounts, err := listCodexAccounts(false)
+		if err != nil {
+			return err
+		}
+		acc, err := resolveCodexAccountSelector(accounts, args[1:])
+		if err != nil {
+			return err
+		}
+		if acc == nil {
+			return fmt.Errorf("no Codex account configured")
+		}
+		return deleteCodexAccountWithMessage(*acc)
+	case "login":
+		accounts, err := listCodexAccounts(false)
+		if err != nil {
+			return err
+		}
+		acc, err := resolveCodexAccountSelector(accounts, args[1:])
+		if err != nil {
+			return err
+		}
+		if acc == nil {
+			return commandNewCodexAccount("")
+		}
+		return reloginCodexAccount(*acc)
+	case "status":
+		accounts, err := listCodexAccounts(false)
+		if err != nil {
+			return err
+		}
+		acc, err := resolveCodexAccountSelector(accounts, args[1:])
+		if err != nil {
+			return err
+		}
+		if acc == nil {
+			return fmt.Errorf("no Codex account configured")
+		}
+		return runCodexSubcommandWithAccount(*acc, []string{"login", "status"})
+	case "refresh":
+		accounts, err := listCodexAccounts(false)
+		if err != nil {
+			return err
+		}
+		enrichCodexAccountUsage(accounts)
+		return printCodexAccounts(accounts)
 	case "list":
 		accounts, err := listCodexAccounts(false)
 		if err != nil {
@@ -737,7 +818,7 @@ func codexAccountsCommand(args []string) error {
 		enrichCodexAccountUsage(accounts)
 		return printCodexAccounts(accounts)
 	default:
-		return fmt.Errorf("usage: agemux codex-accounts [new [name]|list]")
+		return fmt.Errorf("usage: agemux codex-accounts [list|refresh|current|change SELECTOR|new [name]|login [selector]|status [selector]|delete SELECTOR]")
 	}
 }
 
@@ -768,15 +849,290 @@ func codexAccountsInteractive() error {
 	if action.Account == nil {
 		return nil
 	}
-	if err := switchCodexAccount(*action.Account); err != nil {
+	switch action.Action {
+	case "change":
+		if err := switchCodexAccount(*action.Account); err != nil {
+			return err
+		}
+		fmt.Printf("current Codex account: %s\n", codexAccountLabel(*action.Account))
+	case "login":
+		return reloginCodexAccount(*action.Account)
+	case "status":
+		return runCodexSubcommandWithAccount(*action.Account, []string{"login", "status"})
+	}
+	return nil
+}
+
+func codexAccountLabel(acc codexAccount) string {
+	label := acc.Name
+	if acc.Email != "" {
+		label += " <" + acc.Email + ">"
+	}
+	return label
+}
+
+func currentCodexAccount(accounts []codexAccount) *codexAccount {
+	for i := range accounts {
+		if accounts[i].Current {
+			return &accounts[i]
+		}
+	}
+	return nil
+}
+
+func resolveCodexAccountSelector(accounts []codexAccount, selector []string) (*codexAccount, error) {
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	query := normalizeSearch(strings.Join(selector, " "))
+	if query == "" {
+		return currentCodexAccount(accounts), nil
+	}
+	if len(selector) == 1 {
+		if idx, ok := selectorIndex(selector[0]); ok {
+			if idx < 0 || idx >= len(accounts) {
+				return nil, fmt.Errorf("Codex account index out of range: %s", selector[0])
+			}
+			return &accounts[idx], nil
+		}
+	}
+	matches := matchCodexAccounts(accounts, query)
+	if len(matches) == 1 {
+		return &accounts[matches[0]], nil
+	}
+	if len(matches) > 1 {
+		var lines []string
+		for _, idx := range matches {
+			lines = append(lines, fmt.Sprintf("  %d  %s", idx+1, codexAccountLabel(accounts[idx])))
+		}
+		return nil, fmt.Errorf("ambiguous Codex account selector:\n%s", strings.Join(lines, "\n"))
+	}
+	return nil, fmt.Errorf("no Codex account matches %q", strings.Join(selector, " "))
+}
+
+func selectorIndex(text string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil {
+		return 0, false
+	}
+	return n - 1, true
+}
+
+func matchCodexAccounts(accounts []codexAccount, query string) []int {
+	type scored struct {
+		idx   int
+		score int
+	}
+	var scores []scored
+	for i, acc := range accounts {
+		text := normalizeSearch(strings.Join([]string{
+			strconv.Itoa(i + 1),
+			acc.Name,
+			acc.Email,
+			filepath.Base(acc.Path),
+		}, " "))
+		score := 0
+		switch {
+		case text == query:
+			score = 1000
+		case strings.HasPrefix(text, query):
+			score = 900
+		case strings.Contains(text, query):
+			score = 700
+		default:
+			score = max(0, 500-levenshtein(query, text[:min(len(text), max(len(query)*2, 1))]))
+		}
+		if score > 0 {
+			scores = append(scores, scored{i, score})
+		}
+	}
+	sort.SliceStable(scores, func(i, j int) bool {
+		if scores[i].score == scores[j].score {
+			return scores[i].idx < scores[j].idx
+		}
+		return scores[i].score > scores[j].score
+	})
+	if len(scores) == 0 {
+		return nil
+	}
+	best := scores[0].score
+	var matches []int
+	for _, score := range scores {
+		if score.score == best {
+			matches = append(matches, score.idx)
+		}
+	}
+	return matches
+}
+
+func normalizeSearch(text string) string {
+	var b strings.Builder
+	lastSpace := true
+	for _, r := range strings.ToLower(text) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			lastSpace = false
+		} else if !lastSpace {
+			b.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func levenshtein(a, b string) int {
+	ar := []rune(a)
+	br := []rune(b)
+	if len(ar) == 0 {
+		return len(br)
+	}
+	if len(br) == 0 {
+		return len(ar)
+	}
+	prev := make([]int, len(br)+1)
+	curr := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		curr[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 0
+			if ar[i-1] != br[j-1] {
+				cost = 1
+			}
+			curr[j] = min(min(curr[j-1]+1, prev[j]+1), prev[j-1]+cost)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(br)]
+}
+
+func reloginCodexAccount(acc codexAccount) error {
+	tempDir, err := os.MkdirTemp("", "agemux-codex-login-*")
+	if err != nil {
 		return err
 	}
-	label := action.Account.Name
-	if action.Account.Email != "" {
-		label += " <" + action.Account.Email + ">"
+	defer os.RemoveAll(tempDir)
+	content, err := os.ReadFile(acc.Path)
+	if err != nil {
+		return err
 	}
-	fmt.Printf("current Codex account: %s\n", label)
+	if err := writeFileAtomic(filepath.Join(tempDir, "auth.json"), content, 0600); err != nil {
+		return err
+	}
+	fmt.Printf("starting Codex login for %s...\n", codexAccountLabel(acc))
+	cmd := exec.Command(codexBin, "login")
+	cmd.Env = upsertEnv(os.Environ(), "CODEX_HOME", tempDir)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := runForegroundCommand(cmd); err != nil {
+		return err
+	}
+	updated, err := os.ReadFile(filepath.Join(tempDir, "auth.json"))
+	if err != nil {
+		return fmt.Errorf("Codex login did not create auth.json: %w", err)
+	}
+	if len(bytes.TrimSpace(updated)) == 0 {
+		return fmt.Errorf("Codex login created an empty auth.json")
+	}
+	if err := writeFileAtomic(acc.Path, updated, 0600); err != nil {
+		return err
+	}
+	if acc.Current {
+		if err := writeActiveCodexAuth(updated); err != nil {
+			return err
+		}
+	}
+	acc.Email = codexAuthEmail(updated)
+	fmt.Printf("updated Codex account: %s\n", codexAccountLabel(acc))
 	return nil
+}
+
+func runCodexSubcommandWithAccount(acc codexAccount, args []string) error {
+	tempDir, err := os.MkdirTemp("", "agemux-codex-account-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+	content, err := os.ReadFile(acc.Path)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(tempDir, "auth.json"), content, 0600); err != nil {
+		return err
+	}
+	cmd := exec.Command(codexBin, args...)
+	cmd.Env = upsertEnv(os.Environ(), "CODEX_HOME", tempDir)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return runForegroundCommand(cmd)
+}
+
+func deleteCodexAccountWithMessage(acc codexAccount) error {
+	next, err := deleteCodexAccount(acc)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("deleted Codex account: %s\n", codexAccountLabel(acc))
+	if next != nil {
+		fmt.Printf("current Codex account: %s\n", codexAccountLabel(*next))
+	} else {
+		fmt.Println("no current Codex account")
+	}
+	return nil
+}
+
+func deleteCodexAccount(acc codexAccount) (*codexAccount, error) {
+	content, err := os.ReadFile(acc.Path)
+	if err != nil {
+		return nil, err
+	}
+	wasCurrent := isActiveCodexAuth(content)
+	if err := os.Remove(acc.Path); err != nil {
+		return nil, err
+	}
+	if !wasCurrent {
+		return currentCodexAccountAfterReload()
+	}
+	remaining, err := listCodexAccounts(false)
+	if err != nil {
+		return nil, err
+	}
+	if len(remaining) > 0 {
+		next := remaining[0]
+		nextContent, err := os.ReadFile(next.Path)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeActiveCodexAuth(nextContent); err != nil {
+			return nil, err
+		}
+		next.Current = true
+		return &next, nil
+	}
+	activePath := filepath.Join(codexHomeDir(), "auth.json")
+	if isActiveCodexAuth(content) {
+		if err := os.Remove(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func currentCodexAccountAfterReload() (*codexAccount, error) {
+	accounts, err := listCodexAccounts(false)
+	if err != nil {
+		return nil, err
+	}
+	return currentCodexAccount(accounts), nil
+}
+
+func isActiveCodexAuth(content []byte) bool {
+	current, err := os.ReadFile(filepath.Join(codexHomeDir(), "auth.json"))
+	return err == nil && bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(content))
 }
 
 func codexHomeDir() string {
@@ -836,11 +1192,7 @@ func commandNewCodexAccount(name string) error {
 	if err := switchCodexAccount(acc); err != nil {
 		return err
 	}
-	label := acc.Name
-	if acc.Email != "" {
-		label += " <" + acc.Email + ">"
-	}
-	fmt.Printf("current Codex account: %s\n", label)
+	fmt.Printf("current Codex account: %s\n", codexAccountLabel(acc))
 	return nil
 }
 
@@ -887,15 +1239,7 @@ func saveCodexAccount(name string, content []byte) (codexAccount, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return codexAccount{}, err
 	}
-	tmp := filepath.Join(dir, fmt.Sprintf(".auth.%s.%d.%d.tmp", name, os.Getpid(), time.Now().UnixNano()))
-	if err := os.WriteFile(tmp, content, 0600); err != nil {
-		return codexAccount{}, err
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		_ = os.Remove(tmp)
-		return codexAccount{}, err
-	}
-	if err := os.Chmod(target, 0600); err != nil {
+	if err := writeFileAtomic(target, content, 0600); err != nil {
 		return codexAccount{}, err
 	}
 	updated := "-"
@@ -1073,7 +1417,7 @@ func codexUsageParts(usage codexUsageSummary) []string {
 		parts = append(parts, "credits:"+usage.Credits)
 	}
 	if usage.Coupons != "" {
-		parts = append(parts, "reset-credits:"+usage.Coupons)
+		parts = append(parts, "coupons:"+usage.Coupons)
 	}
 	if usage.Updated != "" {
 		parts = append(parts, "usage-updated:"+usage.Updated)
@@ -1217,7 +1561,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.2")
+	req.Header.Set("User-Agent", "agemux/0.1.3")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -1439,6 +1783,34 @@ func codexAccountPicker(accounts []codexAccount) (codexAccountAction, error) {
 			return codexAccountAction{Action: "change", Account: &accounts[selected-1]}, nil
 		case key == "n":
 			return codexAccountAction{Action: "new"}, nil
+		case key == "l":
+			if selected > 0 {
+				return codexAccountAction{Action: "login", Account: &accounts[selected-1]}, nil
+			}
+		case key == "s":
+			if selected > 0 {
+				return codexAccountAction{Action: "status", Account: &accounts[selected-1]}, nil
+			}
+		case key == "r":
+			enrichCodexAccountUsage(accounts)
+		case key == "d" || key == "k" || key == "x":
+			if selected == 0 {
+				continue
+			}
+			accountIndex := selected - 1
+			if confirm(fmt.Sprintf("Delete %s from Codex accounts? y/N", codexAccountLabel(accounts[accountIndex]))) {
+				if _, err := deleteCodexAccount(accounts[accountIndex]); err != nil {
+					return codexAccountAction{}, err
+				}
+				var reloadErr error
+				accounts, reloadErr = listCodexAccounts(false)
+				if reloadErr != nil {
+					return codexAccountAction{}, reloadErr
+				}
+				if selected > len(accounts) {
+					selected = len(accounts)
+				}
+			}
 		case key == "q" || key == "\x1b":
 			return codexAccountAction{}, nil
 		}
@@ -1455,7 +1827,7 @@ func drawCodexAccountPicker(accounts []codexAccount, selected int) {
 	}
 	fmt.Print("\033[H\033[2J")
 	tuiLine(bold(clip("agemux", width-1)) + clip(" - Codex accounts", max(0, width-1-len("agemux"))))
-	tuiLine(dim(clip("Up/Down move  Enter select  n new  q/Esc back", width-1)))
+	tuiLine(dim(clip("Up/Down move  Enter select  n new  l login  s status  r refresh  d delete  q/Esc back", width-1)))
 	tuiLine(strings.Repeat("-", min(width-1, 1000)))
 	visible := max(1, (height-5)/4)
 	offset := 0
@@ -1589,15 +1961,31 @@ func switchCodexAccount(acc codexAccount) error {
 	if err := backupUntrackedActiveCodexAuth(dir, target, content); err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, fmt.Sprintf(".auth.json.%d.%d.tmp", os.Getpid(), time.Now().UnixNano()))
-	if err := os.WriteFile(tmp, content, 0600); err != nil {
+	return writeActiveCodexAuth(content)
+}
+
+func writeActiveCodexAuth(content []byte) error {
+	dir := codexHomeDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, target); err != nil {
+	return writeFileAtomic(filepath.Join(dir, "auth.json"), content, 0600)
+}
+
+func writeFileAtomic(path string, content []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, fmt.Sprintf(".%s.%d.%d.tmp", filepath.Base(path), os.Getpid(), time.Now().UnixNano()))
+	if err := os.WriteFile(tmp, content, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Chmod(target, 0600)
+	return os.Chmod(path, perm)
 }
 
 func backupUntrackedActiveCodexAuth(dir, target string, replacement []byte) error {

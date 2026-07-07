@@ -177,6 +177,78 @@ func TestSwitchCodexAccountBacksUpUntrackedActiveAuth(t *testing.T) {
 	}
 }
 
+func TestDeleteCurrentCodexAccountSwitchesToRemainingAccount(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	alpha := fakeCodexAuth("alpha@example.invalid")
+	beta := fakeCodexAuth("beta@example.invalid")
+	alphaPath := filepath.Join(dir, "auth.alpha.json")
+	betaPath := filepath.Join(dir, "auth.beta.json")
+	if err := os.WriteFile(alphaPath, []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(betaPath, []byte(beta), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := deleteCodexAccount(codexAccount{Name: "alpha", Path: alphaPath, Current: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(alphaPath); !os.IsNotExist(err) {
+		t.Fatalf("alpha auth still exists or stat failed unexpectedly: %v", err)
+	}
+	current, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != beta {
+		t.Fatalf("active auth was not switched to beta: %q", string(current))
+	}
+	if next == nil || next.Name != "beta" || !next.Current {
+		t.Fatalf("next account = %#v", next)
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, "auth.backup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("delete created backup slots: %#v", backups)
+	}
+}
+
+func TestDeleteLastCurrentCodexAccountRemovesActiveAuth(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	alpha := fakeCodexAuth("alpha@example.invalid")
+	alphaPath := filepath.Join(dir, "auth.alpha.json")
+	if err := os.WriteFile(alphaPath, []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := deleteCodexAccount(codexAccount{Name: "alpha", Path: alphaPath, Current: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != nil {
+		t.Fatalf("next account = %#v", next)
+	}
+	if _, err := os.Stat(alphaPath); !os.IsNotExist(err) {
+		t.Fatalf("alpha auth still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("active auth still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
 func TestSaveCodexAccountCreatesSelectableAuthFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
@@ -283,7 +355,7 @@ func TestCodexUsageParsingAndRows(t *testing.T) {
 
 	acc := codexAccount{Name: "tools", Path: filepath.Join(t.TempDir(), "auth.tools.json"), Updated: "07-06 21:30", Usage: usage}
 	joined := strings.Join(codexAccountRowLines(acc, 1, 120), "\n")
-	for _, want := range []string{"plan:pro", "usage:5h:12%/7d:34%", "credits:42", "reset-credits:3"} {
+	for _, want := range []string{"plan:pro", "usage:5h:12%/7d:34%", "credits:42", "coupons:3"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("row missing %q: %q", want, joined)
 		}
