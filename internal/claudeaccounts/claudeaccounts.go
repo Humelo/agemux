@@ -24,7 +24,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.1"
+const version = "0.1.2"
 
 var (
 	home         = homeDir()
@@ -61,6 +61,7 @@ type tableRow struct {
 	Index    string
 	Current  string
 	Name     string
+	Detail   string
 	Login    string
 	Session  string
 	Week     string
@@ -69,6 +70,7 @@ type tableRow struct {
 	Updated  string
 	RawIndex int
 	Acc      account
+	Action   bool
 }
 
 type pickerAction struct {
@@ -1114,6 +1116,16 @@ func buildRows(accounts []account) []tableRow {
 	return rows
 }
 
+func buildPickerRows(accounts []account) []tableRow {
+	rows := []tableRow{{
+		Name:     "+ Add Claude account",
+		Detail:   "Create a new Claude config slot and start login",
+		RawIndex: -1,
+		Action:   true,
+	}}
+	return append(rows, buildRows(accounts)...)
+}
+
 func printTable(accounts []account) error {
 	rows := buildRows(accounts)
 	width, _, _ := term.GetSize(int(os.Stdout.Fd()))
@@ -1141,6 +1153,13 @@ func printAccountRows(rows []tableRow, width, selected int) {
 }
 
 func accountRowLines(row tableRow, width int) []string {
+	if row.Action {
+		lines := hardWrap("", row.Name, max(1, width))
+		if row.Detail != "" {
+			lines = append(lines, wrapParts("    ", []string{row.Detail}, max(1, width))...)
+		}
+		return lines
+	}
 	lineWidth := max(1, width)
 	first := fmt.Sprintf("%s%s  %s", row.Current, row.Index, row.Name)
 	meta := fmt.Sprintf("login:%s", row.Login)
@@ -1368,37 +1387,49 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 	current := currentAccountID(accounts)
 	for i, acc := range accounts {
 		if acc.ID == current {
-			selected = i
+			selected = i + 1
 			break
 		}
 	}
 	buf := make([]byte, 16)
 	for {
-		rows := buildRows(accounts)
-		drawPicker(rows, selected, mode)
+		rows := buildPickerRows(accounts)
+		drawPicker(rows, selected, mode, len(accounts))
 		n, err := os.Stdin.Read(buf)
 		if err != nil {
 			return pickerAction{}, err
 		}
 		key := string(buf[:n])
+		rowCount := len(accounts) + 1
 		switch {
 		case key == "\x1b[A":
-			selected = (selected - 1 + len(accounts)) % len(accounts)
+			selected = (selected - 1 + rowCount) % rowCount
 		case key == "\x1b[B" || key == "j":
-			selected = (selected + 1) % len(accounts)
+			selected = (selected + 1) % rowCount
 		case key == "\r" || key == "\n":
-			return pickerAction{Action: "change", Account: &accounts[selected]}, nil
+			if selected == 0 {
+				return pickerAction{Action: "new"}, nil
+			}
+			return pickerAction{Action: "change", Account: &accounts[selected-1]}, nil
 		case key == "n":
 			return pickerAction{Action: "new"}, nil
 		case key == "l":
-			return pickerAction{Action: "login", Account: &accounts[selected]}, nil
+			if selected > 0 {
+				return pickerAction{Action: "login", Account: &accounts[selected-1]}, nil
+			}
 		case key == "s":
-			return pickerAction{Action: "status", Account: &accounts[selected]}, nil
+			if selected > 0 {
+				return pickerAction{Action: "status", Account: &accounts[selected-1]}, nil
+			}
 		case key == "r":
 			refreshAll(accounts, true, true, nil)
 		case key == "k" || key == "x":
-			if confirm(fmt.Sprintf("Delete %s from Claude accounts? y/N", displayAccountHint(accounts[selected], nil))) {
-				if err := removeAccount(accounts[selected]); err != nil {
+			if selected == 0 {
+				continue
+			}
+			accountIndex := selected - 1
+			if confirm(fmt.Sprintf("Delete %s from Claude accounts? y/N", displayAccountHint(accounts[accountIndex], nil))) {
+				if err := removeAccount(accounts[accountIndex]); err != nil {
 					return pickerAction{}, err
 				}
 				var reloadErr error
@@ -1409,8 +1440,8 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 				if len(accounts) == 0 {
 					return pickerAction{}, nil
 				}
-				if selected >= len(accounts) {
-					selected = len(accounts) - 1
+				if selected > len(accounts) {
+					selected = len(accounts)
 				}
 			}
 		case key == "q" || key == "\x1b":
@@ -1419,7 +1450,7 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 	}
 }
 
-func drawPicker(rows []tableRow, selected int, mode string) {
+func drawPicker(rows []tableRow, selected int, mode string, accountCount int) {
 	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
 	if width <= 0 {
 		width = 100
@@ -1443,7 +1474,7 @@ func drawPicker(rows []tableRow, selected int, mode string) {
 		}
 		tuiLine("")
 	}
-	fmt.Printf("\033[%d;1H%s", height, dim(fmt.Sprintf("%d account(s)", len(rows))))
+	fmt.Printf("\033[%d;1H%s", height, dim(fmt.Sprintf("%d account(s)", accountCount)))
 }
 
 func renderAccountTUILines(row tableRow, selected bool, width int) []string {

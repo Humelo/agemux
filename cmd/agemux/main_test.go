@@ -177,6 +177,68 @@ func TestSwitchCodexAccountBacksUpUntrackedActiveAuth(t *testing.T) {
 	}
 }
 
+func TestSaveCodexAccountCreatesSelectableAuthFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	auth := fakeCodexAuth("new.user@example.invalid")
+	acc, err := saveCodexAccount("new-user", []byte(auth))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.Name != "new-user" || acc.Email != "new.user@example.invalid" {
+		t.Fatalf("saved account = %#v", acc)
+	}
+	if filepath.Base(acc.Path) != "auth.new-user.json" {
+		t.Fatalf("account path = %q", acc.Path)
+	}
+	content, err := os.ReadFile(acc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != auth {
+		t.Fatalf("saved auth = %q", string(content))
+	}
+	if st, err := os.Stat(acc.Path); err != nil {
+		t.Fatal(err)
+	} else if st.Mode()&0777 != 0600 {
+		t.Fatalf("account auth mode = %o", st.Mode()&0777)
+	}
+
+	accounts, err := listCodexAccounts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].Name != "new-user" {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+}
+
+func TestCodexAccountNameHelpers(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	if got := sanitizeCodexAccountName("New User@example.invalid"); got != "new-user@example.invalid" {
+		t.Fatalf("sanitized name = %q", got)
+	}
+	if err := validateCodexAccountName("../bad"); err == nil {
+		t.Fatal("expected invalid account name")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.tools.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := uniqueCodexAccountName("tools"); got != "tools-2" {
+		t.Fatalf("unique name = %q", got)
+	}
+}
+
+func TestCodexAddAccountRowIsVisible(t *testing.T) {
+	lines := strings.Join(renderCodexAddAccountTUILines(false, 100), "\n")
+	if !strings.Contains(lines, "+ Add Codex account") {
+		t.Fatalf("missing add row: %q", lines)
+	}
+}
+
 func fakeCodexAuth(email string) string {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"` + email + `"}`))
 	return `{"tokens":{"id_token":"header.` + payload + `.sig"}}`

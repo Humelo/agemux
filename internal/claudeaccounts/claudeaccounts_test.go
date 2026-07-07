@@ -48,6 +48,20 @@ func TestGeneratedClaudeAccountNamesAreFriendly(t *testing.T) {
 	}
 }
 
+func TestClaudePickerRowsIncludeAddAccountAction(t *testing.T) {
+	rows := buildPickerRows([]account{{ID: "one", ConfigDir: filepath.Join(home, ".claude")}})
+	if len(rows) != 2 {
+		t.Fatalf("row count = %d", len(rows))
+	}
+	if !rows[0].Action || rows[0].Name != "+ Add Claude account" {
+		t.Fatalf("first row = %#v", rows[0])
+	}
+	lines := strings.Join(accountRowLines(rows[0], 100), "\n")
+	if !strings.Contains(lines, "Create a new Claude config slot") {
+		t.Fatalf("missing add detail: %q", lines)
+	}
+}
+
 func TestInstallShimMigratesLegacyClswReal(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("shell shim test is POSIX-specific")
