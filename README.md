@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.4/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.5/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.4/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.5/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.4/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.5/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.4/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.5/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -122,13 +122,16 @@ Agent Multiplexer is a local terminal/session tool, not a hosted proxy, token br
 
 Agent Multiplexer does not store Claude or Codex tokens in its own state files. It stores local config directory paths, cached account status, cached usage data, and persistent session metadata. Cached Claude usage data can include local Claude Code status fields such as session identifiers, model names, and context-window metadata. Codex account switching copies an existing local Codex auth file into Codex's active auth path; it does not log out, revoke tokens, or change provider-side limits.
 
-Dangerous permission bypasses are off by default in `agemux`.
+Agent sessions launched by `agemux` use the official CLI dangerous permission bypass flags by default:
 
-For trusted sandboxed machines only:
+- Codex: `--dangerously-bypass-approvals-and-sandbox`
+- Claude: `--dangerously-skip-permissions`
+
+Use Agent Multiplexer this way only on trusted local machines or disposable sandboxes. To disable the bypass flags:
 
 ```sh
-AGEMUX_CODEX_DANGEROUS=1 agemux codex
-AGEMUX_CLAUDE_DANGEROUS=1 agemux claude
+AGEMUX_CODEX_DANGEROUS=0 agemux codex
+AGEMUX_CLAUDE_DANGEROUS=0 agemux claude
 ```
 
 ## Data

@@ -154,7 +154,8 @@ func usage(prog string) {
 
 Interactive keys: Arrows, Enter, c, C, l, L, k kill, q/Esc.
 Close the VS Code terminal tab to detach without killing the agent.
-Set AGEMUX_CODEX_DANGEROUS=1 or AGEMUX_CLAUDE_DANGEROUS=1 for trusted sandboxes only.
+Codex and Claude run with their dangerous permission bypass flags by default.
+Set AGEMUX_CODEX_DANGEROUS=0 or AGEMUX_CLAUDE_DANGEROUS=0 to disable them.
 Set AGEMUX_ALT_SCREEN=1 to use Codex's alternate screen mode.
 Set AGEMUX_CODEX_BIN, AGEMUX_CLAUDE_BIN, or AGEMUX_SHPOOL_BIN to override binary paths.
 `, prog)
@@ -224,6 +225,19 @@ func truthyEnv(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func defaultDangerousEnv(name string) bool {
+	value, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(value) == "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -471,7 +485,7 @@ func agentArgs(kind, root string) ([]string, error) {
 	switch {
 	case provider == "codex" && (mode == "resume" || mode == "fresh"):
 		args := []string{codexBin}
-		if truthyEnv("AGEMUX_CODEX_DANGEROUS") {
+		if defaultDangerousEnv("AGEMUX_CODEX_DANGEROUS") {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		}
 		if !truthyEnv("AGEMUX_ALT_SCREEN") {
@@ -484,7 +498,7 @@ func agentArgs(kind, root string) ([]string, error) {
 		return args, nil
 	case provider == "claude" && (mode == "resume" || mode == "fresh"):
 		args := []string{executablePath(), "claude-accounts", "run", "--"}
-		if truthyEnv("AGEMUX_CLAUDE_DANGEROUS") {
+		if defaultDangerousEnv("AGEMUX_CLAUDE_DANGEROUS") {
 			args = append(args, "--dangerously-skip-permissions")
 		}
 		if mode == "resume" {
@@ -1567,7 +1581,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.4")
+	req.Header.Set("User-Agent", "agemux/0.1.5")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

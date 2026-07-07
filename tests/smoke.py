@@ -62,7 +62,7 @@ def main():
             if proc.returncode == 0 or "requires POSIX PTY" not in proc.stderr:
                 raise SystemExit(f"Windows agemux non-help command should fail clearly: {proc.stdout!r} {proc.stderr!r}")
         proc = run([str(agemux_bin), "claude-accounts", "version"])
-        if "Claude accounts 0.1.4" not in proc.stdout:
+        if "Claude accounts 0.1.5" not in proc.stdout:
             raise SystemExit(f"unexpected Claude accounts version output: {proc.stdout!r}")
 
         home = tmp / "home"

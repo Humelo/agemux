@@ -74,10 +74,63 @@ func TestClaudeAgentArgsUseAccountRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "claude-accounts run -- --resume") {
+	if len(args) < 5 || args[1] != "claude-accounts" || args[2] != "run" || args[3] != "--" {
 		t.Fatalf("Claude args do not use account runner: %#v", args)
 	}
+	if !containsArg(args, "--resume") {
+		t.Fatalf("Claude resume flag missing: %#v", args)
+	}
+}
+
+func TestAgentArgsUseDangerousPermissionsByDefault(t *testing.T) {
+	t.Setenv("AGEMUX_CODEX_DANGEROUS", "")
+	t.Setenv("AGEMUX_CLAUDE_DANGEROUS", "")
+
+	codexArgs, err := agentArgs("codex-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsArg(codexArgs, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("Codex dangerous flag missing by default: %#v", codexArgs)
+	}
+
+	claudeArgs, err := agentArgs("claude-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsArg(claudeArgs, "--dangerously-skip-permissions") {
+		t.Fatalf("Claude dangerous flag missing by default: %#v", claudeArgs)
+	}
+}
+
+func TestAgentArgsCanDisableDangerousPermissions(t *testing.T) {
+	t.Setenv("AGEMUX_CODEX_DANGEROUS", "0")
+	t.Setenv("AGEMUX_CLAUDE_DANGEROUS", "false")
+
+	codexArgs, err := agentArgs("codex-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsArg(codexArgs, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("Codex dangerous flag should be disabled: %#v", codexArgs)
+	}
+
+	claudeArgs, err := agentArgs("claude-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsArg(claudeArgs, "--dangerously-skip-permissions") {
+		t.Fatalf("Claude dangerous flag should be disabled: %#v", claudeArgs)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCodexAccountsListAndSwitchUseCodeHome(t *testing.T) {
