@@ -1,0 +1,18 @@
+{
+  "version": "0.1.1",
+  "description": "Persistent Codex and Claude session picker plus Claude account switcher",
+  "homepage": "https://github.com/Humelo/agemux",
+  "license": "MIT",
+  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.1/agemux_0.1.1_windows_amd64.zip",
+  "hash": "REPLACE_WITH_RELEASE_SHA256",
+  "bin": [
+    [
+      "agemux.exe",
+      "agemux"
+    ]
+  ],
+  "checkver": "github",
+  "autoupdate": {
+    "url": "https://github.com/Humelo/agemux/releases/download/v$version/agemux_$version_windows_amd64.zip"
+  }
+}
