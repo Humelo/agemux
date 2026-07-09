@@ -35,8 +35,9 @@ import (
 )
 
 const (
-	codexKeyboardSetup = "\033[?2004h\033[>4;0m\033[>7u\033[?1004h"
-	codexKeyboardReset = "\033[?1004l\033[?2004l\033[<u"
+	codexKeyboardSetup       = "\033[?2004h\033[>4;0m\033[>7u\033[?1004h"
+	codexKeyboardReset       = "\033[?1004l\033[?2004l\033[<u"
+	defaultShpoolListTimeout = 5 * time.Second
 )
 
 var (
@@ -124,7 +125,9 @@ func runMain(argv []string) error {
 	case cmd == "list":
 		return printList()
 	case cmd == "attach" && len(argv) == 3:
-		return execAttach(argv[2], "")
+		return execAttach(argv[2], "", false)
+	case cmd == "attach" && len(argv) == 4 && (argv[2] == "--force" || argv[2] == "-f"):
+		return execAttach(argv[3], "", true)
 	case cmd == "kill" && len(argv) == 3:
 		return killSession(argv[2])
 	case cmd == "run" && len(argv) == 5:
@@ -150,10 +153,12 @@ func usage(prog string) {
   %[1]s claude-accounts  open the Claude account switcher
   %[1]s list             list live agemux shpool sessions
   %[1]s attach NAME      attach to a live session
+  %[1]s attach --force NAME
   %[1]s kill NAME        kill a session
 
 Interactive keys: Arrows, Enter, c, C, l, L, k kill, q/Esc.
 Close the VS Code terminal tab to detach without killing the agent.
+Already-attached sessions are not force-detached by default; use attach --force intentionally.
 Codex and Claude run with their dangerous permission bypass flags by default.
 Set AGEMUX_CODEX_DANGEROUS=0 or AGEMUX_CLAUDE_DANGEROUS=0 to disable them.
 Set AGEMUX_ALT_SCREEN=1 to use Codex's alternate screen mode.
@@ -239,6 +244,20 @@ func defaultDangerousEnv(name string) bool {
 	default:
 		return true
 	}
+}
+
+func durationEnv(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(value); err == nil && d > 0 {
+		return d
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return fallback
 }
 
 func executablePath() string {
@@ -368,9 +387,16 @@ func updateMeta(name string, fields map[string]any) error {
 }
 
 func shpoolSessions() ([]map[string]any, error) {
-	cmd := exec.Command(shpoolBin, "list", "--json")
+	timeout := durationEnv("AGEMUX_SHPOOL_LIST_TIMEOUT", defaultShpoolListTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, shpoolBin, "list", "--json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%s list --json timed out after %s; shpool may be wedged by a stale attached client", shpoolBin, timeout)
+		}
 		if errors.Is(err, exec.ErrNotFound) {
 			return nil, fmt.Errorf("missing shpool. Install shpool to use agemux persistent sessions")
 		}
@@ -433,17 +459,29 @@ func isAgemuxSessionName(name string) bool {
 }
 
 func liveSessionNames() (map[string]bool, error) {
-	sessions, err := shpoolSessions()
+	states, err := liveSessionStates()
 	if err != nil {
 		return nil, err
 	}
 	names := map[string]bool{}
-	for _, sess := range sessions {
-		if name, _ := sess["name"].(string); name != "" {
-			names[name] = true
-		}
+	for name := range states {
+		names[name] = true
 	}
 	return names, nil
+}
+
+func liveSessionStates() (map[string]string, error) {
+	sessions, err := shpoolSessions()
+	if err != nil {
+		return nil, err
+	}
+	states := map[string]string{}
+	for _, sess := range sessions {
+		if name, _ := sess["name"].(string); name != "" {
+			states[name] = strings.ToLower(stringValue(sess["status"]))
+		}
+	}
+	return states, nil
 }
 
 func int64Value(value any) int64 {
@@ -649,11 +687,14 @@ func runCommand(name, kind, root string) string {
 	return shellJoin(append([]string{"/usr/bin/env"}, args...))
 }
 
-func execAttach(name, createKind string) error {
+func execAttach(name, createKind string, force bool) error {
 	if err := ensureName(name); err != nil {
 		return err
 	}
-	args := []string{shpoolBin, "attach", "-f"}
+	args := []string{shpoolBin, "attach"}
+	if force {
+		args = append(args, "-f")
+	}
 	kind := createKind
 	if createKind != "" {
 		root := rootDir()
@@ -662,12 +703,16 @@ func execAttach(name, createKind string) error {
 		}
 		args = append(args, "--dir", root, "--cmd", runCommand(name, createKind, root))
 	} else {
-		names, err := liveSessionNames()
+		states, err := liveSessionStates()
 		if err != nil {
 			return err
 		}
-		if !names[name] {
+		status, ok := states[name]
+		if !ok {
 			return fmt.Errorf("no live agemux session named %q", name)
+		}
+		if status == "attached" && !force {
+			return fmt.Errorf("session %q is already attached; refusing implicit force-detach because stale VS Code/SSH clients can wedge shpool. Close the old terminal or run `agemux attach --force %s` intentionally", name, name)
 		}
 		emitSessionTitle(name)
 		kind = sessionKind(name)
@@ -710,7 +755,7 @@ func create(kind string) error {
 	for names[name] {
 		name = nowName()
 	}
-	return execAttach(name, kind)
+	return execAttach(name, kind, false)
 }
 
 func printList() error {
@@ -1581,7 +1626,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.5")
+	req.Header.Set("User-Agent", "agemux/0.1.6")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -2262,7 +2307,7 @@ func runAction(action, value string) error {
 		}
 		return fmt.Errorf("unknown account action: %s", value)
 	case "attach":
-		return execAttach(value, "")
+		return execAttach(value, "", false)
 	case "kill":
 		return killSession(value)
 	default:

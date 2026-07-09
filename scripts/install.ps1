@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Repo = if ($env:AGEMUX_REPO) { $env:AGEMUX_REPO } else { "Humelo/agemux" }
-$Ref = if ($env:AGEMUX_REF) { $env:AGEMUX_REF } else { "v0.1.5" }
+$Ref = if ($env:AGEMUX_REF) { $env:AGEMUX_REF } else { "v0.1.6" }
 $BinDir = if ($env:AGEMUX_BIN_DIR) { $env:AGEMUX_BIN_DIR } else { Join-Path $HOME ".local\bin" }
 $InstallClaudeShim = $false
 $InstallCodexLb = $false

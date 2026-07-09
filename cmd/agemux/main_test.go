@@ -124,6 +124,78 @@ func TestAgentArgsCanDisableDangerousPermissions(t *testing.T) {
 	}
 }
 
+func TestShpoolSessionsTimesOut(t *testing.T) {
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then sleep 2; exit 0; fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	t.Setenv("AGEMUX_SHPOOL_LIST_TIMEOUT", "100ms")
+
+	_, err := shpoolSessions()
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestExecAttachRefusesAttachedSessionWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	called := filepath.Join(dir, "called")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Attached\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf '%s\\n' \"$*\" > "+shellQuote(called)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+
+	err := execAttach("agemux-test", "", false)
+	if err == nil || !strings.Contains(err.Error(), "already attached") {
+		t.Fatalf("expected already-attached refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatalf("shpool attach should not have been called, stat err = %v", statErr)
+	}
+}
+
+func TestExecAttachOnlyUsesForceWhenExplicit(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf '%s\\n' \"$*\" > "+shellQuote(argsFile)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+
+	if err := execAttach("agemux-test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), " -f ") || strings.Contains(string(args), "--force") {
+		t.Fatalf("non-force attach used force flag: %q", string(args))
+	}
+
+	if err := execAttach("agemux-test", "", true); err != nil {
+		t.Fatal(err)
+	}
+	args, err = os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "-f") {
+		t.Fatalf("force attach did not pass -f: %q", string(args))
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {
@@ -131,6 +203,29 @@ func containsArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func fakeShpoolScript(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "shpool")
+	content := "#!/usr/bin/env bash\nset -euo pipefail\n" + body
+	if err := os.WriteFile(path, []byte(content), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func withShpoolBin(t *testing.T, path string) {
+	t.Helper()
+	old := shpoolBin
+	shpoolBin = path
+	t.Cleanup(func() {
+		shpoolBin = old
+	})
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func TestCodexAccountsListAndSwitchUseCodeHome(t *testing.T) {
