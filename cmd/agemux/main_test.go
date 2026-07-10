@@ -196,6 +196,27 @@ func TestExecAttachOnlyUsesForceWhenExplicit(t *testing.T) {
 	}
 }
 
+func TestExecAttachReportsLiveSessionTransportFailure(t *testing.T) {
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then exit 1; fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	err := execAttach("agemux-test", "", false)
+	if err == nil {
+		t.Fatal("expected attach failure")
+	}
+	if !strings.Contains(err.Error(), "still live (disconnected)") ||
+		!strings.Contains(err.Error(), "transport was interrupted or wedged") {
+		t.Fatalf("unexpected attach error: %v", err)
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {

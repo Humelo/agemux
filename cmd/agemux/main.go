@@ -723,7 +723,31 @@ func execAttach(name, createKind string, force bool) error {
 		emitCodexKeyboardSetup()
 		defer emitCodexKeyboardReset()
 	}
-	return runForeground(args)
+	err := runForeground(args)
+	if err == nil {
+		return nil
+	}
+	return diagnoseAttachFailure(name, err)
+}
+
+func diagnoseAttachFailure(name string, attachErr error) error {
+	var code exitCodeError
+	if !errors.As(attachErr, &code) || int(code) != 1 {
+		return attachErr
+	}
+	states, err := liveSessionStates()
+	if err != nil {
+		return attachErr
+	}
+	status, live := states[name]
+	if !live {
+		return attachErr
+	}
+	return fmt.Errorf(
+		"session %q is still live (%s), but shpool attach exited with status 1; terminal transport was interrupted or wedged while the agent may still be running. Reopen the session; if it exits immediately again, inspect the active work before killing it",
+		name,
+		status,
+	)
 }
 
 func runForeground(args []string) error {
@@ -1626,7 +1650,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.6")
+	req.Header.Set("User-Agent", "agemux/0.1.7")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

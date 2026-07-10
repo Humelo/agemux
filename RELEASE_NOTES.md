@@ -1,20 +1,20 @@
-# Agent Multiplexer v0.1.6
+# Agent Multiplexer v0.1.7
 
-Stale attach safety update.
+Terminal transport diagnostics.
 
-- Stops default attach from force-detaching sessions that are already attached elsewhere.
-- Adds explicit `agemux attach --force NAME` for intentional takeover.
-- Adds a timeout around `shpool list --json` so the picker fails clearly instead of hanging forever when the shpool daemon is wedged.
-- Keeps disconnected sessions attachable without the risky force-detach path.
+- Detects when `shpool attach` exits while the selected session is still live.
+- Reports that terminal transport was interrupted or wedged instead of silently returning to the shell.
+- Reminds users that the agent may still be running before they kill the persistent session.
+- Keeps the existing no-implicit-force and explicit `--force` safety behavior.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.6/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.7/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.6/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.7/scripts/install.sh | bash -s -- --with-codex-lb
 ```
