@@ -47,7 +47,7 @@ var (
 	lockFile  = filepath.Join(dataDir, "sessions.lock")
 	titleRE   = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
 	nameRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
-	shpoolBin = resolveBinary("AGEMUX_SHPOOL_BIN", "/home/linuxbrew/.linuxbrew/bin/shpool", "shpool")
+	shpoolBin = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
 	codexBin  = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
 )
 
@@ -215,8 +215,10 @@ func resolveBinary(envName, defaultPath, fallback string) string {
 	if value := os.Getenv(envName); value != "" {
 		return value
 	}
-	if st, err := os.Stat(defaultPath); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
-		return defaultPath
+	if defaultPath != "" {
+		if st, err := os.Stat(defaultPath); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
+			return defaultPath
+		}
 	}
 	if found, err := exec.LookPath(fallback); err == nil {
 		return found

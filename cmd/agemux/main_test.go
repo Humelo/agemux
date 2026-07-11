@@ -14,6 +14,20 @@ import (
 	"time"
 )
 
+func TestResolveBinaryUsesPathWithoutPreferredPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "shpool")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("TEST_SHPOOL_BIN", "")
+
+	if got := resolveBinary("TEST_SHPOOL_BIN", "", "shpool"); got != bin {
+		t.Fatalf("resolved %q, want %q", got, bin)
+	}
+}
+
 func TestTitleParserPreservesRawTitleText(t *testing.T) {
 	var got []string
 	parser := &titleParser{callback: func(title string) {
