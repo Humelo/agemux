@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -41,6 +42,17 @@ func TestTitleParserPreservesRawTitleText(t *testing.T) {
 	}
 	if got[0] != "A+B 100% done" {
 		t.Fatalf("title was modified: %q", got[0])
+	}
+}
+
+func TestCodexKeyboardSetupDoesNotEnableFocusTracking(t *testing.T) {
+	if strings.Contains(codexKeyboardSetup, "\x1b[?1004h") {
+		t.Fatal("attach-time setup must not enable focus tracking before Codex is ready")
+	}
+	for _, sequence := range []string{"\x1b[?2004h", "\x1b[>7u"} {
+		if !strings.Contains(codexKeyboardSetup, sequence) {
+			t.Fatalf("attach-time setup is missing %q", sequence)
+		}
 	}
 }
 
@@ -231,6 +243,29 @@ func TestExecAttachReportsLiveSessionTransportFailure(t *testing.T) {
 	}
 }
 
+func TestKillSessionRefusesUnownedShpoolSession(t *testing.T) {
+	dir := t.TempDir()
+	called := filepath.Join(dir, "called")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"foreign-session\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf '%s\\n' \"$*\" > "+shellQuote(called)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, dir)
+
+	err := killSession("foreign-session")
+	if err == nil || !strings.Contains(err.Error(), "no live agemux session") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
+		t.Fatalf("unowned session reached shpool kill: %v", statErr)
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {
@@ -256,6 +291,21 @@ func withShpoolBin(t *testing.T, path string) {
 	shpoolBin = path
 	t.Cleanup(func() {
 		shpoolBin = old
+	})
+}
+
+func withMetadataDir(t *testing.T, dir string) {
+	t.Helper()
+	oldDataDir := dataDir
+	oldMetaFile := metaFile
+	oldLockFile := lockFile
+	dataDir = dir
+	metaFile = filepath.Join(dir, "sessions.json")
+	lockFile = filepath.Join(dir, "sessions.lock")
+	t.Cleanup(func() {
+		dataDir = oldDataDir
+		metaFile = oldMetaFile
+		lockFile = oldLockFile
 	})
 }
 
@@ -382,6 +432,96 @@ func TestSwitchCodexAccountBacksUpUntrackedActiveAuth(t *testing.T) {
 	}
 	if string(current) != alpha {
 		t.Fatalf("auth.json content = %q", string(current))
+	}
+}
+
+func TestSwitchCodexAccountPersistsRefreshedActiveAuth(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	alphaOld := fakeCodexAuthVersion("alpha@example.invalid", "old")
+	alphaRefreshed := fakeCodexAuthVersion("alpha@example.invalid", "refreshed")
+	beta := fakeCodexAuthVersion("beta@example.invalid", "current")
+	alphaPath := filepath.Join(dir, "auth.alpha.json")
+	betaPath := filepath.Join(dir, "auth.beta.json")
+	if err := os.WriteFile(alphaPath, []byte(alphaOld), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(betaPath, []byte(beta), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(alphaRefreshed), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts, err := listCodexAccounts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current := currentCodexAccount(accounts); current == nil || current.Name != "alpha" {
+		t.Fatalf("refreshed active account was not recognized: %#v", current)
+	}
+	if err := switchCodexAccount(codexAccount{Name: "beta", Path: betaPath}); err != nil {
+		t.Fatal(err)
+	}
+	synced, err := os.ReadFile(alphaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(synced) != alphaRefreshed {
+		t.Fatalf("refreshed credentials were not synced: %q", string(synced))
+	}
+	active, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(active) != beta {
+		t.Fatalf("active credentials = %q", string(active))
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, "auth.backup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("refreshed managed auth was backed up as untracked: %#v", backups)
+	}
+}
+
+func TestSaveCodexAccountSerializesDuplicateNames(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	contents := []string{
+		fakeCodexAuth("one@example.invalid"),
+		fakeCodexAuth("two@example.invalid"),
+	}
+	errs := make([]error, len(contents))
+	var wg sync.WaitGroup
+	for i := range contents {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_, errs[index] = saveCodexAccount("shared", []byte(contents[index]))
+		}(i)
+	}
+	wg.Wait()
+	successes := 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
+		} else if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("unexpected save error: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful saves = %d, errors = %#v", successes, errs)
+	}
+	stored, err := os.ReadFile(filepath.Join(dir, "auth.shared.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != contents[0] && string(stored) != contents[1] {
+		t.Fatalf("stored credentials were overwritten or corrupted: %q", string(stored))
 	}
 }
 
@@ -523,8 +663,12 @@ func TestCodexAddAccountRowIsVisible(t *testing.T) {
 }
 
 func fakeCodexAuth(email string) string {
+	return fakeCodexAuthVersion(email, "")
+}
+
+func fakeCodexAuthVersion(email, version string) string {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"` + email + `"}`))
-	return `{"tokens":{"id_token":"header.` + payload + `.sig"}}`
+	return `{"version":"` + version + `","tokens":{"id_token":"header.` + payload + `.sig"}}`
 }
 
 func TestCodexAccountRowsUseCompactFileName(t *testing.T) {

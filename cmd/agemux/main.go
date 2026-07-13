@@ -29,13 +29,16 @@ import (
 	"unicode"
 
 	claudeaccounts "github.com/Humelo/agemux/internal/claudeaccounts"
+	"github.com/Humelo/agemux/internal/termkey"
 	"github.com/creack/pty"
 	"github.com/gofrs/flock"
 	"golang.org/x/term"
 )
 
 const (
-	codexKeyboardSetup       = "\033[?2004h\033[>4;0m\033[>7u\033[?1004h"
+	// Focus tracking is deliberately omitted: enabling it before shpool finishes
+	// attaching can queue ESC[I events that later appear in Codex's composer.
+	codexKeyboardSetup       = "\033[?2004h\033[>4;0m\033[>7u"
 	codexKeyboardReset       = "\033[?1004l\033[?2004l\033[<u"
 	defaultShpoolListTimeout = 5 * time.Second
 )
@@ -86,6 +89,10 @@ type codexUsageSummary struct {
 type codexAccountAction struct {
 	Action  string
 	Account *codexAccount
+}
+
+type codexAccountState struct {
+	Name string `json:"name"`
 }
 
 func main() {
@@ -1122,13 +1129,19 @@ func reloginCodexAccount(acc codexAccount) error {
 	if len(bytes.TrimSpace(updated)) == 0 {
 		return fmt.Errorf("Codex login created an empty auth.json")
 	}
-	if err := writeFileAtomic(acc.Path, updated, 0600); err != nil {
-		return err
-	}
-	if acc.Current {
-		if err := writeActiveCodexAuth(updated); err != nil {
+	if err := withCodexAccountsLock(func() error {
+		if err := writeFileAtomic(acc.Path, updated, 0600); err != nil {
 			return err
 		}
+		if acc.Current {
+			if err := writeActiveCodexAuth(updated); err != nil {
+				return err
+			}
+			return saveCodexAccountState(acc.Name)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	acc.Email = codexAuthEmail(updated)
 	fmt.Printf("updated Codex account: %s\n", codexAccountLabel(acc))
@@ -1171,11 +1184,7 @@ func deleteCodexAccountWithMessage(acc codexAccount) error {
 }
 
 func deleteCodexAccount(acc codexAccount) (*codexAccount, error) {
-	content, err := os.ReadFile(acc.Path)
-	if err != nil {
-		return nil, err
-	}
-	wasCurrent := isActiveCodexAuth(content)
+	wasCurrent := acc.Current
 	if err := os.Remove(acc.Path); err != nil {
 		return nil, err
 	}
@@ -1195,14 +1204,18 @@ func deleteCodexAccount(acc codexAccount) (*codexAccount, error) {
 		if err := writeActiveCodexAuth(nextContent); err != nil {
 			return nil, err
 		}
+		if err := saveCodexAccountState(next.Name); err != nil {
+			return nil, err
+		}
 		next.Current = true
 		return &next, nil
 	}
 	activePath := filepath.Join(codexHomeDir(), "auth.json")
-	if isActiveCodexAuth(content) {
-		if err := os.Remove(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
+	if err := os.Remove(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err := os.Remove(codexAccountStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	return nil, nil
 }
@@ -1213,11 +1226,6 @@ func currentCodexAccountAfterReload() (*codexAccount, error) {
 		return nil, err
 	}
 	return currentCodexAccount(accounts), nil
-}
-
-func isActiveCodexAuth(content []byte) bool {
-	current, err := os.ReadFile(filepath.Join(codexHomeDir(), "auth.json"))
-	return err == nil && bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(content))
 }
 
 func codexHomeDir() string {
@@ -1319,12 +1327,14 @@ func saveCodexAccount(name string, content []byte) (codexAccount, error) {
 		return codexAccount{}, err
 	}
 	target := codexAccountPath(name)
-	if _, err := os.Stat(target); err == nil {
-		return codexAccount{}, fmt.Errorf("Codex account %q already exists", name)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return codexAccount{}, err
-	}
-	if err := writeFileAtomic(target, content, 0600); err != nil {
+	if err := withCodexAccountsLock(func() error {
+		if _, err := os.Stat(target); err == nil {
+			return fmt.Errorf("Codex account %q already exists", name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return writeFileAtomic(target, content, 0600)
+	}); err != nil {
 		return codexAccount{}, err
 	}
 	updated := "-"
@@ -1403,18 +1413,16 @@ func listCodexAccounts(includeUsage bool) ([]codexAccount, error) {
 	dir := codexHomeDir()
 	currentPath := filepath.Join(dir, "auth.json")
 	current, _ := os.ReadFile(currentPath)
-	paths, err := filepath.Glob(filepath.Join(dir, "auth.*.json"))
+	paths, err := codexAccountPaths(dir)
 	if err != nil {
 		return nil, err
 	}
+	activeSlot := resolveActiveCodexAccountPath(dir, current, paths)
 	accounts := make([]codexAccount, 0, len(paths))
 	for _, path := range paths {
 		base := filepath.Base(path)
 		name := strings.TrimSuffix(strings.TrimPrefix(base, "auth."), ".json")
 		if name == "" || name == "json" {
-			continue
-		}
-		if strings.HasPrefix(name, "backup-") {
 			continue
 		}
 		content, err := os.ReadFile(path)
@@ -1429,7 +1437,7 @@ func listCodexAccounts(includeUsage bool) ([]codexAccount, error) {
 			Name:    name,
 			Path:    path,
 			Email:   codexAuthEmail(content),
-			Current: len(current) > 0 && bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(content)),
+			Current: activeSlot != "" && samePath(activeSlot, path),
 			Updated: updated,
 		})
 	}
@@ -1592,7 +1600,7 @@ func runCodexLoadingRefresh(accounts []codexAccount) {
 			if len(lines) == 0 {
 				lines = append(lines, "waiting for workers...")
 			}
-			for _, line := range lines[:min(len(lines), height-5)] {
+			for _, line := range lines[:min(len(lines), max(0, height-5))] {
 				tuiLine(clip(line, width-1))
 			}
 			frame++
@@ -1652,7 +1660,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.7")
+	req.Header.Set("User-Agent", "agemux/0.1.8")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -1856,11 +1864,10 @@ func codexAccountPicker(accounts []codexAccount) (codexAccountAction, error) {
 	buf := make([]byte, 16)
 	for {
 		drawCodexAccountPicker(accounts, selected)
-		n, err := os.Stdin.Read(buf)
+		key, err := termkey.Read(os.Stdin, buf)
 		if err != nil {
 			return codexAccountAction{}, err
 		}
-		key := string(buf[:n])
 		rowCount := len(accounts) + 1
 		switch {
 		case key == "\x1b[A":
@@ -2040,19 +2047,165 @@ func hardWrapLine(prefix, text string, width int) []string {
 }
 
 func switchCodexAccount(acc codexAccount) error {
-	content, err := os.ReadFile(acc.Path)
-	if err != nil {
-		return err
-	}
 	dir := codexHomeDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	target := filepath.Join(dir, "auth.json")
-	if err := backupUntrackedActiveCodexAuth(dir, target, content); err != nil {
+	return withCodexAccountsLock(func() error {
+		if _, err := syncActiveCodexAccount(dir); err != nil {
+			return err
+		}
+		content, err := os.ReadFile(acc.Path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dir, "auth.json")
+		if err := backupUntrackedActiveCodexAuth(dir, target, content); err != nil {
+			return err
+		}
+		if err := writeActiveCodexAuth(content); err != nil {
+			return err
+		}
+		return saveCodexAccountState(acc.Name)
+	})
+}
+
+func withCodexAccountsLock(fn func() error) error {
+	dir := codexHomeDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	return writeActiveCodexAuth(content)
+	lock := flock.New(filepath.Join(dir, ".agemux-accounts.lock"))
+	if err := lock.Lock(); err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return fn()
+}
+
+func codexAccountStatePath() string {
+	return filepath.Join(codexHomeDir(), ".agemux-current-account.json")
+}
+
+func loadCodexAccountState() codexAccountState {
+	var state codexAccountState
+	content, err := os.ReadFile(codexAccountStatePath())
+	if err == nil {
+		_ = json.Unmarshal(content, &state)
+	}
+	return state
+}
+
+func saveCodexAccountState(name string) error {
+	content, err := json.Marshal(codexAccountState{Name: name})
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(codexAccountStatePath(), append(content, '\n'), 0600)
+}
+
+func codexAccountPaths(dir string) ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "auth.*.json"))
+	if err != nil {
+		return nil, err
+	}
+	filtered := paths[:0]
+	for _, path := range paths {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "auth."), ".json")
+		if name == "" || name == "json" || strings.HasPrefix(name, "backup-") {
+			continue
+		}
+		filtered = append(filtered, path)
+	}
+	return filtered, nil
+}
+
+func resolveActiveCodexAccountPath(dir string, current []byte, paths []string) string {
+	if len(bytes.TrimSpace(current)) == 0 {
+		return ""
+	}
+	state := loadCodexAccountState()
+	if state.Name != "" && validateCodexAccountName(state.Name) == nil {
+		path := filepath.Join(dir, "auth."+state.Name+".json")
+		if content, err := os.ReadFile(path); err == nil && sameCodexAuthIdentity(current, content) {
+			return path
+		}
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(content)) {
+			return path
+		}
+	}
+	identity := codexAuthIdentity(current)
+	if identity == "" {
+		return ""
+	}
+	match := ""
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil || codexAuthIdentity(content) != identity {
+			continue
+		}
+		if match != "" {
+			return ""
+		}
+		match = path
+	}
+	return match
+}
+
+func syncActiveCodexAccount(dir string) (string, error) {
+	current, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	paths, err := codexAccountPaths(dir)
+	if err != nil {
+		return "", err
+	}
+	path := resolveActiveCodexAccountPath(dir, current, paths)
+	if path == "" {
+		return "", nil
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(stored)) {
+		if err := writeFileAtomic(path, current, 0600); err != nil {
+			return "", err
+		}
+	}
+	return path, nil
+}
+
+func codexAuthIdentity(content []byte) string {
+	email := strings.ToLower(strings.TrimSpace(codexAuthEmail(content)))
+	if email == "" {
+		return ""
+	}
+	return "email:" + email
+}
+
+func sameCodexAuthIdentity(left, right []byte) bool {
+	if bytes.Equal(bytes.TrimSpace(left), bytes.TrimSpace(right)) {
+		return true
+	}
+	leftID := codexAuthIdentity(left)
+	return leftID != "" && leftID == codexAuthIdentity(right)
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr == nil && rightErr == nil {
+		return leftAbs == rightAbs
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func writeActiveCodexAuth(content []byte) error {
@@ -2208,6 +2361,20 @@ func stringValue(value any) string {
 func killSession(name string) error {
 	if err := ensureName(name); err != nil {
 		return err
+	}
+	sessions, err := agemuxSessions()
+	if err != nil {
+		return err
+	}
+	owned := false
+	for _, session := range sessions {
+		if stringValue(session["name"]) == name {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		return fmt.Errorf("no live agemux session named %q", name)
 	}
 	cmd := exec.Command(shpoolBin, "kill", "--", name)
 	out, err := cmd.CombinedOutput()
@@ -2396,11 +2563,13 @@ func tuiMenu() (string, string, error) {
 	defer signal.Stop(winch)
 	lastWidth, lastHeight := 0, 0
 	dirty := true
+	items, err := menuItems()
+	if err != nil {
+		return "", "", err
+	}
+	refresh := time.NewTicker(time.Second)
+	defer refresh.Stop()
 	for {
-		items, err := menuItems()
-		if err != nil {
-			return "", "", err
-		}
 		if len(items) == 0 {
 			return "", "", nil
 		}
@@ -2419,19 +2588,24 @@ func tuiMenu() (string, string, error) {
 			drawMenu(items, selected)
 			dirty = false
 		}
-		n, err := os.Stdin.Read(reader)
+		key, err := termkey.Read(os.Stdin, reader)
 		if err != nil && !errors.Is(err, syscall.EAGAIN) {
 			return "", "", err
 		}
-		if n == 0 {
+		if key == "" {
 			select {
 			case <-winch:
+				dirty = true
+			case <-refresh.C:
+				items, err = menuItems()
+				if err != nil {
+					return "", "", err
+				}
 				dirty = true
 			case <-time.After(50 * time.Millisecond):
 			}
 			continue
 		}
-		key := string(reader[:n])
 		switch {
 		case key == "\x1b[A":
 			selected = moveSelectionUp(selected, len(items), lastActionCol)

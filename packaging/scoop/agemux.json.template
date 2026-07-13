@@ -1,9 +1,9 @@
 {
-  "version": "0.1.7",
-  "description": "Persistent Codex and Claude session picker plus Claude account switcher",
+  "version": "0.1.8",
+  "description": "Persistent Codex and Claude sessions with built-in account views",
   "homepage": "https://github.com/Humelo/agemux",
   "license": "MIT",
-  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.7/agemux_0.1.7_windows_amd64.zip",
+  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.8/agemux_0.1.8_windows_amd64.zip",
   "hash": "REPLACE_WITH_RELEASE_SHA256",
   "bin": [
     [

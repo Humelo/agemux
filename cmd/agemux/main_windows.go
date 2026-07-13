@@ -120,7 +120,7 @@ func listWindowsCodexAccounts() ([]windowsCodexAccount, error) {
 	for _, path := range paths {
 		base := filepath.Base(path)
 		name := strings.TrimSuffix(strings.TrimPrefix(base, "auth."), ".json")
-		if name == "" || name == "json" {
+		if name == "" || name == "json" || strings.HasPrefix(name, "backup-") {
 			continue
 		}
 		content, err := os.ReadFile(path)
@@ -201,11 +201,44 @@ func switchWindowsCodexAccount(acc windowsCodexAccount) error {
 		return err
 	}
 	target := filepath.Join(dir, "auth.json")
+	if err := backupUntrackedWindowsCodexAuth(dir, target, content); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Chmod(target, 0600)
+}
+
+func backupUntrackedWindowsCodexAuth(dir, target string, replacement []byte) error {
+	current, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current = bytes.TrimSpace(current)
+	if len(current) == 0 || bytes.Equal(current, bytes.TrimSpace(replacement)) {
+		return nil
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "auth.*.json"))
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(bytes.TrimSpace(content), current) {
+			return nil
+		}
+	}
+	backup := filepath.Join(dir, fmt.Sprintf("auth.backup-%s-%d.json", time.Now().Format("20060102-150405"), time.Now().UnixNano()))
+	if err := os.WriteFile(backup, current, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(backup, 0600)
 }
 
 func windowsCodexAccountLabel(acc windowsCodexAccount) string {

@@ -19,12 +19,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/Humelo/agemux/internal/termkey"
 	"github.com/gofrs/flock"
+	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 )
 
-const version = "0.1.7"
+const version = "0.1.8"
 
 var (
 	home         = homeDir()
@@ -637,20 +640,34 @@ func sortedKeys(values map[string]bool) []string {
 	return keys
 }
 
-func nextNewConfigDir() string {
+func reserveNewConfigDir() (string, error) {
 	for i := 1; i < 1000; i++ {
 		candidate := filepath.Join(home, fmt.Sprintf(".claude-account-%d", i))
-		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
-			return displayPath(candidate)
+		if err := os.Mkdir(candidate, 0700); err == nil {
+			return displayPath(candidate), nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
 		}
 	}
-	return displayPath(filepath.Join(home, ".claude-account-"+time.Now().Format("20060102-150405")))
+	for i := 0; i < 1000; i++ {
+		candidate := filepath.Join(home, fmt.Sprintf(".claude-account-%d-%d", time.Now().UnixNano(), i))
+		if err := os.Mkdir(candidate, 0700); err == nil {
+			return displayPath(candidate), nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("could not reserve a Claude account directory")
 }
 
 func createNewAccount() (account, error) {
-	configDir := nextNewConfigDir()
-	acc := account{ID: accountIDForPath(configDir), ConfigDir: displayPath(configDir), Aliases: []string{}}
+	var acc account
 	if err := withLock(func() error {
+		configDir, err := reserveNewConfigDir()
+		if err != nil {
+			return err
+		}
+		acc = account{ID: accountIDForPath(configDir), ConfigDir: displayPath(configDir), Aliases: []string{}}
 		disk, _ := readAccountsUnlocked()
 		disk.Accounts = append(disk.Accounts, acc)
 		ignored := map[string]bool{}
@@ -660,14 +677,15 @@ func createNewAccount() (account, error) {
 		delete(ignored, resolvedPath(configDir))
 		disk.IgnoredConfigDirs = sortedKeys(ignored)
 		disk.Accounts = dedupeAccounts(disk.Accounts)
-		return saveJSON(accountsFile, disk, 0600)
+		if err := saveJSON(accountsFile, disk, 0600); err != nil {
+			_ = os.Remove(resolvedPath(configDir))
+			return err
+		}
+		return nil
 	}); err != nil {
 		return account{}, err
 	}
 	if err := resetAccountSettings(acc); err != nil {
-		return account{}, err
-	}
-	if err := setCurrentAccount(acc); err != nil {
 		return account{}, err
 	}
 	return acc, nil
@@ -680,7 +698,10 @@ func commandNew() error {
 	}
 	fmt.Printf("created Claude account slot: %s\n", displayPath(acc.ConfigDir))
 	fmt.Println("starting Claude login for the new slot...")
-	return runClaudeSubcommand(acc, []string{"auth", "login"})
+	if err := runClaudeSubcommand(acc, []string{"auth", "login"}); err != nil {
+		return err
+	}
+	return setCurrentAccount(acc)
 }
 
 func accountEnv(acc account) []string {
@@ -1186,7 +1207,7 @@ func accountRowLines(row tableRow, width int) []string {
 		"fable:" + row.Fable,
 		"reset:" + row.Reset,
 	}
-	if len([]rune(first+"  "+meta)) <= lineWidth {
+	if displayWidth(first+"  "+meta) <= lineWidth {
 		first = first + "  " + meta
 	} else {
 		limitParts = append([]string{meta}, limitParts...)
@@ -1196,8 +1217,8 @@ func accountRowLines(row tableRow, width int) []string {
 }
 
 func wrapParts(prefix string, parts []string, width int) []string {
-	if width <= len([]rune(prefix)) {
-		width = len([]rune(prefix)) + 1
+	if width <= displayWidth(prefix) {
+		width = displayWidth(prefix) + 1
 	}
 	var lines []string
 	current := prefix
@@ -1205,7 +1226,7 @@ func wrapParts(prefix string, parts []string, width int) []string {
 		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		if len([]rune(prefix+part)) > width {
+		if displayWidth(prefix+part) > width {
 			if strings.TrimSpace(current) != "" {
 				lines = append(lines, current)
 				current = prefix
@@ -1219,7 +1240,7 @@ func wrapParts(prefix string, parts []string, width int) []string {
 		} else {
 			candidate += "  " + part
 		}
-		if len([]rune(candidate)) > width && strings.TrimSpace(current) != "" {
+		if displayWidth(candidate) > width && strings.TrimSpace(current) != "" {
 			lines = append(lines, current)
 			current = prefix + part
 			continue
@@ -1236,13 +1257,14 @@ func wrapParts(prefix string, parts []string, width int) []string {
 }
 
 func hardWrap(prefix, text string, width int) []string {
-	prefixWidth := len([]rune(prefix))
+	prefixWidth := displayWidth(prefix)
 	bodyWidth := max(1, width-prefixWidth)
 	runes := []rune(text)
 	var lines []string
-	for len(runes) > bodyWidth {
-		lines = append(lines, prefix+string(runes[:bodyWidth]))
-		runes = runes[bodyWidth:]
+	for displayWidth(string(runes)) > bodyWidth {
+		head, tail := splitDisplayRunes(runes, bodyWidth)
+		lines = append(lines, prefix+string(head))
+		runes = tail
 	}
 	if len(runes) > 0 {
 		lines = append(lines, prefix+string(runes))
@@ -1254,25 +1276,26 @@ func hardWrap(prefix, text string, width int) []string {
 }
 
 func clipDisplay(text string, width int) string {
-	runes := []rune(text)
 	if width <= 0 {
 		return ""
 	}
-	if len(runes) <= width {
+	if displayWidth(text) <= width {
 		return text
 	}
 	if width <= 3 {
-		return string(runes[:width])
+		head, _ := splitDisplayRunes([]rune(text), width)
+		return string(head)
 	}
-	return string(runes[:width-3]) + "..."
+	head, _ := splitDisplayRunes([]rune(text), width-3)
+	return string(head) + "..."
 }
 
 func padDisplay(text string, width int) string {
-	runes := []rune(text)
-	if len(runes) >= width {
+	used := displayWidth(text)
+	if used >= width {
 		return text
 	}
-	return text + strings.Repeat(" ", width-len(runes))
+	return text + strings.Repeat(" ", width-used)
 }
 
 func wrapDisplay(text string, width, maxLines int) []string {
@@ -1281,12 +1304,40 @@ func wrapDisplay(text string, width, maxLines int) []string {
 	}
 	runes := []rune(text)
 	var lines []string
-	for len(runes) > width && len(lines) < maxLines-1 {
-		lines = append(lines, string(runes[:width]))
-		runes = runes[width:]
+	for displayWidth(string(runes)) > width && len(lines) < maxLines-1 {
+		head, tail := splitDisplayRunes(runes, width)
+		lines = append(lines, string(head))
+		runes = tail
 	}
 	lines = append(lines, clipDisplay(string(runes), width))
 	return lines
+}
+
+func displayWidth(text string) int {
+	return runewidth.StringWidth(text)
+}
+
+func splitDisplayRunes(runes []rune, width int) ([]rune, []rune) {
+	if len(runes) == 0 || width <= 0 {
+		return nil, runes
+	}
+	used := 0
+	cut := 0
+	for cut < len(runes) {
+		next := runewidth.RuneWidth(runes[cut])
+		if cut > 0 && used+next > width {
+			break
+		}
+		used += next
+		cut++
+		if used >= width {
+			for cut < len(runes) && runewidth.RuneWidth(runes[cut]) == 0 {
+				cut++
+			}
+			break
+		}
+	}
+	return runes[:cut], runes[cut:]
 }
 
 func interactive() error {
@@ -1380,7 +1431,7 @@ func runLoadingRefresh(accounts []account) {
 			if len(lines) == 0 {
 				lines = append(lines, "waiting for workers...")
 			}
-			for _, line := range lines[:min(len(lines), height-5)] {
+			for _, line := range lines[:min(len(lines), max(0, height-5))] {
 				tuiLine(clipDisplay(line, width-1))
 			}
 			frame++
@@ -1409,11 +1460,10 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 	for {
 		rows := buildPickerRows(accounts)
 		drawPicker(rows, selected, mode, len(accounts))
-		n, err := os.Stdin.Read(buf)
+		key, err := termkey.Read(os.Stdin, buf)
 		if err != nil {
 			return pickerAction{}, err
 		}
-		key := string(buf[:n])
 		rowCount := len(accounts) + 1
 		switch {
 		case key == "\x1b[A":
@@ -1753,7 +1803,7 @@ func normalizeSearch(text string) string {
 	var b strings.Builder
 	lastSpace := true
 	for _, r := range strings.ToLower(text) {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(r)
 			lastSpace = false
 		} else if !lastSpace {
@@ -2005,11 +2055,11 @@ func invokedScriptPath() string {
 			return abs
 		}
 	}
-	if exe, err := os.Executable(); err == nil {
-		return exe
-	}
 	if found, err := exec.LookPath(filepath.Base(os.Args[0])); err == nil {
 		return found
+	}
+	if exe, err := os.Executable(); err == nil {
+		return exe
 	}
 	return os.Args[0]
 }

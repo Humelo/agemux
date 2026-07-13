@@ -27,10 +27,10 @@ def cross_build_matrix(go):
     for goos, goarch in matrix:
         suffix = ".exe" if goos == "windows" else ""
         env = dict(os.environ)
-        env.update({"GOOS": goos, "GOARCH": goarch})
+        env.update({"CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch})
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
-            run([go, "build", "-o", str(tmp / f"agemux{suffix}"), "./cmd/agemux"], cwd=ROOT, env=env)
+            run([go, "build", "-trimpath", "-o", str(tmp / f"agemux{suffix}"), "./cmd/agemux"], cwd=ROOT, env=env)
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
         build = tmp / "build"
         build.mkdir()
         agemux_bin = build / ("agemux.exe" if os.name == "nt" else "agemux")
-        run([go, "build", "-o", str(agemux_bin), "./cmd/agemux"], cwd=ROOT)
+        run([go, "build", "-trimpath", "-o", str(agemux_bin), "./cmd/agemux"], cwd=ROOT)
         run([str(agemux_bin), "--help"])
         empty_codex_home = tmp / "empty-codex"
         empty_codex_home.mkdir()
@@ -62,7 +62,7 @@ def main():
             if proc.returncode == 0 or "requires POSIX PTY" not in proc.stderr:
                 raise SystemExit(f"Windows agemux non-help command should fail clearly: {proc.stdout!r} {proc.stderr!r}")
         proc = run([str(agemux_bin), "claude-accounts", "version"])
-        if "Claude accounts 0.1.7" not in proc.stdout:
+        if "Claude accounts 0.1.8" not in proc.stdout:
             raise SystemExit(f"unexpected Claude accounts version output: {proc.stdout!r}")
 
         home = tmp / "home"

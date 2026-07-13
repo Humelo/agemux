@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -33,6 +34,47 @@ func TestWrapDisplaySplitsLongCells(t *testing.T) {
 	}
 	if lines[1] != "ijklm..." {
 		t.Fatalf("second line = %q", lines[1])
+	}
+}
+
+func TestDisplayHelpersRespectWideCharacters(t *testing.T) {
+	if got := displayWidth("계정 A"); got != 6 {
+		t.Fatalf("display width = %d", got)
+	}
+	clipped := clipDisplay("한국어-account", 9)
+	if displayWidth(clipped) > 9 {
+		t.Fatalf("clipped text is too wide: %q (%d)", clipped, displayWidth(clipped))
+	}
+	padded := padDisplay("계정", 8)
+	if displayWidth(padded) != 8 {
+		t.Fatalf("padded width = %d for %q", displayWidth(padded), padded)
+	}
+	for _, line := range hardWrap("  ", "한국어-label", 8) {
+		if displayWidth(line) > 8 {
+			t.Fatalf("wrapped line is too wide: %q (%d)", line, displayWidth(line))
+		}
+	}
+}
+
+func TestNormalizeSearchPreservesUnicode(t *testing.T) {
+	if got := normalizeSearch("  한국 계정-2  "); got != "한국 계정 2" {
+		t.Fatalf("normalized search = %q", got)
+	}
+}
+
+func TestInvokedScriptPathPrefersPathEntry(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "agemux")
+	if err := os.WriteFile(want, []byte("test"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldArgs := os.Args
+	os.Args = []string{"agemux"}
+	t.Cleanup(func() { os.Args = oldArgs })
+	t.Setenv("PATH", dir)
+
+	if got := invokedScriptPath(); got != want {
+		t.Fatalf("invoked path = %q, want %q", got, want)
 	}
 }
 
@@ -88,6 +130,56 @@ func TestCommandDeleteRemovesAccountAndPersistsNextCurrent(t *testing.T) {
 	}
 	if current := accountByID(currentAccountID(accounts), accounts); current == nil || resolvedPath(current.ConfigDir) != resolvedPath(second.ConfigDir) {
 		t.Fatalf("current account = %#v", current)
+	}
+}
+
+func TestCreateNewAccountReservesUniqueDirectories(t *testing.T) {
+	restore := useTestClaudeAccountsDataDir(t)
+	defer restore()
+
+	accounts := make([]account, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range accounts {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			accounts[index], errs[index] = createNewAccount()
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if resolvedPath(accounts[0].ConfigDir) == resolvedPath(accounts[1].ConfigDir) {
+		t.Fatalf("concurrent account creation reused %q", accounts[0].ConfigDir)
+	}
+	for _, acc := range accounts {
+		if st, err := os.Stat(resolvedPath(acc.ConfigDir)); err != nil || !st.IsDir() {
+			t.Fatalf("reserved directory %q is missing: %v", acc.ConfigDir, err)
+		}
+	}
+}
+
+func TestCreateNewAccountDoesNotChangeCurrentBeforeLogin(t *testing.T) {
+	restore := useTestClaudeAccountsDataDir(t)
+	defer restore()
+
+	current := account{ID: "current", ConfigDir: filepath.Join(home, ".claude")}
+	if err := setCurrentAccount(current); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createNewAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == current.ID {
+		t.Fatal("new account unexpectedly reused the current account")
+	}
+	if got := loadState().CurrentID; got != current.ID {
+		t.Fatalf("current account changed before login: got %q, want %q", got, current.ID)
 	}
 }
 
