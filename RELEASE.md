@@ -12,7 +12,7 @@
 2. Build release artifacts:
 
    ```sh
-   version=0.1.8
+   version=0.1.9
    rm -rf dist
    mkdir -p dist
 
@@ -38,11 +38,11 @@
 4. Tag and create the GitHub release with binary assets:
 
    ```sh
-   git tag v0.1.8
+   git tag v0.1.9
    git push origin main --tags
-   gh release create v0.1.8 dist/agemux_0.1.8_* \
+   gh release create v0.1.9 dist/agemux_0.1.9_* \
      --repo Humelo/agemux \
-     --title "Agent Multiplexer v0.1.8" \
+     --title "Agent Multiplexer v0.1.9" \
      --notes-file RELEASE_NOTES.md
    ```
 
@@ -50,11 +50,11 @@
 
    ```sh
    tmp="$(mktemp -d)"
-   AGEMUX_INSTALL_PREFIX="$tmp" AGEMUX_REF=v0.1.8 scripts/install.sh
+   AGEMUX_INSTALL_PREFIX="$tmp" AGEMUX_REF=v0.1.9 scripts/install.sh
    "$tmp/bin/agemux" --help
    "$tmp/bin/agemux" claude-accounts version
 
-   AGEMUX_REPO=<owner>/<repo> AGEMUX_REF=v0.1.8 scripts/install.sh --with-codex-lb
+   AGEMUX_REPO=<owner>/<repo> AGEMUX_REF=v0.1.9 scripts/install.sh --with-codex-lb
    codex-lb -h
    uv tool list | grep codex-lb
    ```
@@ -62,9 +62,9 @@
 6. Generate checksums and replace template placeholders:
 
    ```sh
-   sha256sum dist/agemux_0.1.8_*
-   curl -L -o dist/agemux-v0.1.8-source.tar.gz https://github.com/Humelo/agemux/archive/refs/tags/v0.1.8.tar.gz
-   sha256sum dist/agemux-v0.1.8-source.tar.gz
+   sha256sum dist/agemux_0.1.9_*
+   curl -L -o dist/agemux-v0.1.9-source.tar.gz https://github.com/Humelo/agemux/archive/refs/tags/v0.1.9.tar.gz
+   sha256sum dist/agemux-v0.1.9-source.tar.gz
    ```
 
    Use the source archive checksum for `packaging/homebrew/agemux.rb.template`.

@@ -223,6 +223,7 @@ func TestExecAttachOnlyUsesForceWhenExplicit(t *testing.T) {
 }
 
 func TestExecAttachReportsLiveSessionTransportFailure(t *testing.T) {
+	withoutAttachRetryDelay(t)
 	fake := fakeShpoolScript(t,
 		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
 			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
@@ -240,6 +241,103 @@ func TestExecAttachReportsLiveSessionTransportFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "still live (disconnected)") ||
 		!strings.Contains(err.Error(), "transport was interrupted or wedged") {
 		t.Fatalf("unexpected attach error: %v", err)
+	}
+}
+
+func TestExecAttachReconnectsAfterTransportFailure(t *testing.T) {
+	withoutAttachRetryDelay(t)
+	dir := t.TempDir()
+	attemptsFile := filepath.Join(dir, "attempts")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then\n"+
+			"  attempts=0\n"+
+			"  if [[ -f "+shellQuote(attemptsFile)+" ]]; then attempts=$(cat "+shellQuote(attemptsFile)+"); fi\n"+
+			"  attempts=$((attempts + 1))\n"+
+			"  printf '%s' \"$attempts\" > "+shellQuote(attemptsFile)+"\n"+
+			"  if [[ $attempts -eq 1 ]]; then exit 1; fi\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	if err := execAttach("agemux-test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := os.ReadFile(attemptsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(attempts) != "2" {
+		t.Fatalf("attach attempts = %q, want 2", attempts)
+	}
+}
+
+func TestShouldReconnectAttachWaitsForDetachedState(t *testing.T) {
+	withoutAttachRetryDelay(t)
+	dir := t.TempDir()
+	listCountFile := filepath.Join(dir, "list-count")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  count=0\n"+
+			"  if [[ -f "+shellQuote(listCountFile)+" ]]; then count=$(cat "+shellQuote(listCountFile)+"); fi\n"+
+			"  count=$((count + 1))\n"+
+			"  printf '%s' \"$count\" > "+shellQuote(listCountFile)+"\n"+
+			"  if [[ $count -eq 1 ]]; then status=Attached; else status=Disconnected; fi\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"%s\"}]}' \"$status\"\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	if !shouldReconnectAttach("agemux-test", exitCodeError(1)) {
+		t.Fatal("expected transient attached state to become reconnectable")
+	}
+	count, err := os.ReadFile(listCountFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(count) != "2" {
+		t.Fatalf("list calls = %q, want 2", count)
+	}
+}
+
+func TestExecAttachDoesNotReconnectAfterSessionExit(t *testing.T) {
+	withoutAttachRetryDelay(t)
+	dir := t.TempDir()
+	listCountFile := filepath.Join(dir, "list-count")
+	attachCountFile := filepath.Join(dir, "attach-count")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  count=0\n"+
+			"  if [[ -f "+shellQuote(listCountFile)+" ]]; then count=$(cat "+shellQuote(listCountFile)+"); fi\n"+
+			"  count=$((count + 1))\n"+
+			"  printf '%s' \"$count\" > "+shellQuote(listCountFile)+"\n"+
+			"  if [[ $count -eq 1 ]]; then printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'; else printf '{\"sessions\":[]}'; fi\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then\n"+
+			"  printf x >> "+shellQuote(attachCountFile)+"\n"+
+			"  exit 1\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	if err := execAttach("agemux-test", "", false); err == nil {
+		t.Fatal("expected attach failure")
+	}
+	attempts, err := os.ReadFile(attachCountFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(attempts) != "x" {
+		t.Fatalf("attach attempts = %q, want one", attempts)
 	}
 }
 
@@ -291,6 +389,15 @@ func withShpoolBin(t *testing.T, path string) {
 	shpoolBin = path
 	t.Cleanup(func() {
 		shpoolBin = old
+	})
+}
+
+func withoutAttachRetryDelay(t *testing.T) {
+	t.Helper()
+	old := attachRetrySleep
+	attachRetrySleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		attachRetrySleep = old
 	})
 }
 

@@ -41,17 +41,22 @@ const (
 	codexKeyboardSetup       = "\033[?2004h\033[>4;0m\033[>7u"
 	codexKeyboardReset       = "\033[?1004l\033[?2004l\033[<u"
 	defaultShpoolListTimeout = 5 * time.Second
+	maxAttachReconnects      = 5
+	attachStatePolls         = 6
+	attachStatePollDelay     = 100 * time.Millisecond
+	attachReconnectWindow    = time.Minute
 )
 
 var (
-	prefix    = envDefaultAny([]string{"AGEMUX_PREFIX", "AGENTMUX_PREFIX"}, "agemux")
-	dataDir   = expandPath(envDefault("AGEMUX_DATA_DIR", defaultDataDir()))
-	metaFile  = filepath.Join(dataDir, "sessions.json")
-	lockFile  = filepath.Join(dataDir, "sessions.lock")
-	titleRE   = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
-	nameRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
-	shpoolBin = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
-	codexBin  = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
+	prefix           = envDefaultAny([]string{"AGEMUX_PREFIX", "AGENTMUX_PREFIX"}, "agemux")
+	dataDir          = expandPath(envDefault("AGEMUX_DATA_DIR", defaultDataDir()))
+	metaFile         = filepath.Join(dataDir, "sessions.json")
+	lockFile         = filepath.Join(dataDir, "sessions.lock")
+	titleRE          = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
+	nameRE           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
+	shpoolBin        = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
+	codexBin         = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
+	attachRetrySleep = time.Sleep
 )
 
 type metadata map[string]map[string]any
@@ -729,14 +734,69 @@ func execAttach(name, createKind string, force bool) error {
 	args = append(args, "--", name)
 	provider, _ := splitKind(kind)
 	if provider == "codex" {
-		emitCodexKeyboardSetup()
 		defer emitCodexKeyboardReset()
 	}
-	err := runForeground(args)
-	if err == nil {
-		return nil
+	reconnects := 0
+	for {
+		if provider == "codex" {
+			emitCodexKeyboardSetup()
+		}
+		attachedAt := time.Now()
+		err := runForeground(args)
+		if err == nil {
+			return nil
+		}
+		if time.Since(attachedAt) >= attachReconnectWindow {
+			reconnects = 0
+		}
+		if reconnects >= maxAttachReconnects || !shouldReconnectAttach(name, err) {
+			return diagnoseAttachFailure(name, err)
+		}
+
+		reconnects++
+		attempt := reconnects
+		fmt.Fprintf(os.Stderr, "\r\n[agemux] shpool transport disconnected; reconnecting (%d/%d)...\r\n", attempt, maxAttachReconnects)
+		attachRetrySleep(attachReconnectDelay(attempt))
+		args = []string{shpoolBin, "attach", "--", name}
 	}
-	return diagnoseAttachFailure(name, err)
+}
+
+func shouldReconnectAttach(name string, attachErr error) bool {
+	var code exitCodeError
+	if !errors.As(attachErr, &code) || int(code) != 1 {
+		return false
+	}
+	for poll := 0; poll < attachStatePolls; poll++ {
+		states, err := liveSessionStates()
+		if err != nil {
+			return false
+		}
+		status, live := states[name]
+		if !live {
+			return false
+		}
+		if status == "disconnected" {
+			return true
+		}
+		if status != "attached" {
+			return false
+		}
+		if poll+1 < attachStatePolls {
+			attachRetrySleep(attachStatePollDelay)
+		}
+	}
+	return false
+}
+
+func attachReconnectDelay(attempt int) time.Duration {
+	delay := 250 * time.Millisecond
+	for i := 1; i < attempt && delay < 2*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 2*time.Second {
+		return 2 * time.Second
+	}
+	return delay
 }
 
 func diagnoseAttachFailure(name string, attachErr error) error {
@@ -1660,7 +1720,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.8")
+	req.Header.Set("User-Agent", "agemux/0.1.9")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
