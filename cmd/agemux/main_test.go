@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -361,6 +362,68 @@ func TestKillSessionRefusesUnownedShpoolSession(t *testing.T) {
 	}
 	if _, statErr := os.Stat(called); !os.IsNotExist(statErr) {
 		t.Fatalf("unowned session reached shpool kill: %v", statErr)
+	}
+}
+
+func TestDetachSessionPreservesMetadata(t *testing.T) {
+	dir := t.TempDir()
+	called := filepath.Join(dir, "called")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Attached\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf '%s' \"$*\" > "+shellQuote(called)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, dir)
+	if err := registerSession("agemux-test", "codex-resume", "/tmp/project"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := detachSession("agemux-test"); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(called)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(args) != "detach agemux-test" {
+		t.Fatalf("detach args = %q", args)
+	}
+	meta, err := loadMetaUnlocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := meta["agemux-test"]
+	if row == nil || row["kind"] != "codex-resume" {
+		t.Fatalf("session metadata was not preserved: %#v", row)
+	}
+}
+
+func TestDetachSessionIsNoopWhenDisconnected(t *testing.T) {
+	dir := t.TempDir()
+	called := filepath.Join(dir, "called")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf x > "+shellQuote(called)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, dir)
+	if err := registerSession("agemux-test", "codex-resume", "/tmp/project"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := detachSession("agemux-test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disconnected session reached shpool detach: %v", err)
 	}
 }
 

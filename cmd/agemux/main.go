@@ -140,6 +140,8 @@ func runMain(argv []string) error {
 		return execAttach(argv[2], "", false)
 	case cmd == "attach" && len(argv) == 4 && (argv[2] == "--force" || argv[2] == "-f"):
 		return execAttach(argv[3], "", true)
+	case cmd == "detach" && len(argv) == 3:
+		return detachSession(argv[2])
 	case cmd == "kill" && len(argv) == 3:
 		return killSession(argv[2])
 	case cmd == "run" && len(argv) == 5:
@@ -166,9 +168,10 @@ func usage(prog string) {
   %[1]s list             list live agemux shpool sessions
   %[1]s attach NAME      attach to a live session
   %[1]s attach --force NAME
+  %[1]s detach NAME      detach a session without stopping it
   %[1]s kill NAME        kill a session
 
-Interactive keys: Arrows, Enter, c, C, l, L, k kill, q/Esc.
+Interactive keys: Arrows, Enter, c, C, l, L, d detach, k kill, q/Esc.
 Close the VS Code terminal tab to detach without killing the agent.
 Already-attached sessions are not force-detached by default; use attach --force intentionally.
 Codex and Claude run with their dangerous permission bypass flags by default.
@@ -1720,7 +1723,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.9")
+	req.Header.Set("User-Agent", "agemux/0.1.10")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -2419,22 +2422,8 @@ func stringValue(value any) string {
 }
 
 func killSession(name string) error {
-	if err := ensureName(name); err != nil {
+	if _, err := requireAgemuxSession(name); err != nil {
 		return err
-	}
-	sessions, err := agemuxSessions()
-	if err != nil {
-		return err
-	}
-	owned := false
-	for _, session := range sessions {
-		if stringValue(session["name"]) == name {
-			owned = true
-			break
-		}
-	}
-	if !owned {
-		return fmt.Errorf("no live agemux session named %q", name)
 	}
 	cmd := exec.Command(shpoolBin, "kill", "--", name)
 	out, err := cmd.CombinedOutput()
@@ -2445,6 +2434,42 @@ func killSession(name string) error {
 		delete(meta, name)
 		return saveMetaUnlocked(meta)
 	})
+}
+
+func detachSession(name string) error {
+	session, err := requireAgemuxSession(name)
+	if err != nil {
+		return err
+	}
+	status := strings.ToLower(stringValue(session["status"]))
+	if status == "disconnected" || status == "detached" {
+		return nil
+	}
+	if status != "attached" {
+		return fmt.Errorf("session %q cannot be detached from status %q", name, status)
+	}
+	cmd := exec.Command(shpoolBin, "detach", name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s detach failed: %s", shpoolBin, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func requireAgemuxSession(name string) (map[string]any, error) {
+	if err := ensureName(name); err != nil {
+		return nil, err
+	}
+	sessions, err := agemuxSessions()
+	if err != nil {
+		return nil, err
+	}
+	for _, session := range sessions {
+		if stringValue(session["name"]) == name {
+			return session, nil
+		}
+	}
+	return nil, fmt.Errorf("no live agemux session named %q", name)
 }
 
 func menuItems() ([]menuItem, error) {
@@ -2490,8 +2515,8 @@ func statusLabel(status string) string {
 	switch strings.ToLower(status) {
 	case "attached":
 		return "Attached"
-	case "detached":
-		return "Detached"
+	case "detached", "disconnected":
+		return "Disconnected"
 	default:
 		return ""
 	}
@@ -2531,8 +2556,8 @@ func interactive() error {
 		if err != nil || action == "" {
 			return err
 		}
-		if action == "kill" {
-			if err := killSession(value); err != nil {
+		if action == "kill" || action == "detach" {
+			if err := runAction(action, value); err != nil {
 				return err
 			}
 			continue
@@ -2561,6 +2586,8 @@ func runAction(action, value string) error {
 		return fmt.Errorf("unknown account action: %s", value)
 	case "attach":
 		return execAttach(value, "", false)
+	case "detach":
+		return detachSession(value)
 	case "kill":
 		return killSession(value)
 	default:
@@ -2696,6 +2723,11 @@ func tuiMenu() (string, string, error) {
 			return "new", "claude-resume", nil
 		case key == "L":
 			return "new", "claude-fresh", nil
+		case key == "d":
+			item := items[selected]
+			if item.Type == "session" {
+				return "detach", item.Name, nil
+			}
 		case key == "k" || key == "x":
 			item := items[selected]
 			if item.Type == "session" && confirm(fmt.Sprintf("Kill %s (%s)? y/N", item.Label, item.Name)) {
@@ -2798,7 +2830,7 @@ func drawMenu(items []menuItem, selected int) {
 	}
 	fmt.Print("\033[H\033[2J")
 	tuiLine(bold(clip("agemux", width-1)) + clip(" - persistent Codex and Claude sessions via shpool", max(0, width-1-len("agemux"))))
-	tuiLine(dim(clip("Arrows move  Enter open  c Codex  C new Codex  l Claude  L new Claude  k kill  q/Esc quit", width-1)))
+	tuiLine(dim(clip("Arrows move  Enter open  c Codex  C new Codex  l Claude  L new Claude  d detach  k kill  q/Esc quit", width-1)))
 	tuiLine(strings.Repeat("-", min(width-1, 1000)))
 	drawActionGrid(items, selected, width)
 	tuiLine("")

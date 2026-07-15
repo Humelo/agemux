@@ -1,21 +1,21 @@
-# Agent Multiplexer v0.1.9
+# Agent Multiplexer v0.1.10
 
-Automatic recovery for interrupted shpool terminal transports.
+Non-destructive session detach controls.
 
-- Reconnects automatically when shpool exits with status 1 but the agent session remains live and disconnected.
-- Waits for shpool's delayed `attached` to `disconnected` state transition before deciding whether recovery is safe.
-- Uses bounded exponential backoff and stops after five consecutive failures.
-- Resets the retry budget after a stable minute so isolated failures do not accumulate over long-running terminals.
-- Does not force-detach sessions that another client still owns and does not retry sessions that have exited.
+- Press `d` on a session in the main picker to detach its terminal without stopping the agent.
+- Run `agemux detach NAME` for the same behavior in scripts or another shell.
+- Keeps agemux metadata intact so detached sessions remain available for later reattachment.
+- Treats already-disconnected sessions as a safe no-op.
+- Shows disconnected state explicitly in the session list while retaining confirmed `k` kill behavior.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.9/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.9/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash -s -- --with-codex-lb
 ```

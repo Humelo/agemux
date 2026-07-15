@@ -51,6 +51,7 @@ func main() {
   agemux claude-accounts  open the Claude account switcher
   agemux list             list live agemux shpool sessions
   agemux attach NAME      attach to a live session
+  agemux detach NAME      detach a session without stopping it
   agemux kill NAME        kill a session`)
 		fmt.Println()
 		fmt.Println("Native Windows is not supported for agemux sessions. Use WSL, Linux, or macOS.")
