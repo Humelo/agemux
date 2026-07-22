@@ -177,7 +177,12 @@ func TestAgentArgsUseNamedResumeOptions(t *testing.T) {
 }
 
 func TestControlChannelSendsAndCaptures(t *testing.T) {
-	t.Setenv("AGEMUX_CONTROL_DIR", t.TempDir())
+	controlDir, err := os.MkdirTemp("/tmp", "agemux-control-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(controlDir) })
+	t.Setenv("AGEMUX_CONTROL_DIR", controlDir)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
