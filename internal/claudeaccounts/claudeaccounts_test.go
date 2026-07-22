@@ -64,7 +64,11 @@ func TestNormalizeSearchPreservesUnicode(t *testing.T) {
 
 func TestInvokedScriptPathPrefersPathEntry(t *testing.T) {
 	dir := t.TempDir()
-	want := filepath.Join(dir, "agemux")
+	name := "agemux"
+	if os.PathSeparator == '\\' {
+		name += ".exe"
+	}
+	want := filepath.Join(dir, name)
 	if err := os.WriteFile(want, []byte("test"), 0755); err != nil {
 		t.Fatal(err)
 	}
