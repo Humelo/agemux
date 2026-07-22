@@ -2361,7 +2361,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.11")
+	req.Header.Set("User-Agent", "agemux/0.1.12")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -3077,13 +3077,25 @@ func stringSliceValue(value any) []string {
 }
 
 func killSession(name string) error {
-	if _, err := requireAgemuxSession(name); err != nil {
+	session, err := requireAgemuxSession(name)
+	if err != nil {
 		return err
 	}
-	cmd := exec.Command(shpoolBin, "kill", "--", name)
-	out, err := cmd.CombinedOutput()
+	out, err := exec.Command(shpoolBin, "kill", "--", name).CombinedOutput()
+	if err != nil && strings.EqualFold(stringValue(session["status"]), "Disconnected") {
+		if repairOut, repairErr := exec.Command(shpoolBin, "attach", "--background", "--", name).CombinedOutput(); repairErr == nil {
+			out, err = exec.Command(shpoolBin, "kill", "--", name).CombinedOutput()
+		} else if len(bytes.TrimSpace(out)) == 0 {
+			out = repairOut
+			err = repairErr
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("%s kill failed: %s", shpoolBin, strings.TrimSpace(string(out)))
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("%s kill failed: %s", shpoolBin, detail)
 	}
 	return withMetaLock(func(meta metadata) error {
 		delete(meta, name)

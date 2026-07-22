@@ -615,6 +615,83 @@ func TestKillSessionRefusesUnownedShpoolSession(t *testing.T) {
 	}
 }
 
+func TestKillSessionRepairsDisconnectedStaleSession(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	killCount := filepath.Join(dir, "kill-count")
+	fake := fakeShpoolScript(t,
+		"printf '%s\\n' \"$*\" >> "+shellQuote(calls)+"\n"+
+			"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"kill\" ]]; then\n"+
+			"  count=0\n"+
+			"  if [[ -f "+shellQuote(killCount)+" ]]; then count=$(cat "+shellQuote(killCount)+"); fi\n"+
+			"  count=$((count + 1))\n"+
+			"  printf '%s' \"$count\" > "+shellQuote(killCount)+"\n"+
+			"  [[ $count -gt 1 ]]\n"+
+			"  exit\n"+
+			"fi\n"+
+			"if [[ \"$1 $2\" == \"attach --background\" ]]; then exit 0; fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, dir)
+	if err := registerSession("agemux-test", "codex-resume", "/tmp/project"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := killSession("agemux-test"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"list --json",
+		"kill -- agemux-test",
+		"attach --background -- agemux-test",
+		"kill -- agemux-test",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("missing call %q in %q", want, content)
+		}
+	}
+}
+
+func TestKillSessionDoesNotRepairAttachedSession(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"printf '%s\\n' \"$*\" >> "+shellQuote(calls)+"\n"+
+			"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Attached\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"kill\" ]]; then exit 1; fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, dir)
+	if err := registerSession("agemux-test", "codex-resume", "/tmp/project"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := killSession("agemux-test")
+	if err == nil || !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content, readErr := os.ReadFile(calls)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(content), "attach --background") {
+		t.Fatalf("attached session entered stale repair: %q", content)
+	}
+}
+
 func TestDetachSessionPreservesMetadata(t *testing.T) {
 	dir := t.TempDir()
 	called := filepath.Join(dir, "called")
