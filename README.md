@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.11/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.11/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.11/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.11/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -44,6 +44,9 @@ agemux codex
 agemux codex-new
 agemux claude
 agemux claude-new
+agemux start codex nightly-review --resume SESSION_UUID --background --root /workspace/project
+printf '%s' 'Review the pending queue.' | agemux send nightly-review
+agemux capture nightly-review --lines 120
 agemux codex-accounts
 agemux codex-accounts new
 agemux codex-accounts change 2
@@ -67,6 +70,25 @@ agemux attach --force NAME
 - `k`: kill selected persistent session after confirmation
 
 Close the terminal tab to detach. The underlying session keeps running in `shpool`.
+
+Named Codex sessions can be started without attaching a terminal. `agemux send` delivers one submitted prompt to the session's PTY, and `agemux capture` reads recent terminal output for health checks. Sending works while the shpool session is attached or detached and does not take over another terminal attachment.
+
+```sh
+agemux start codex nightly-review \
+  --resume SESSION_UUID \
+  --background \
+  --root /workspace/project \
+  --model gpt-5.6-sol \
+  --effort high \
+  --service-tier default \
+  --config notice.hide_rate_limit_model_nudge=true
+
+agemux send nightly-review "Continue the scheduled review."
+agemux send nightly-review --file /path/to/prompt.txt
+agemux capture nightly-review --lines 200
+```
+
+The control channel is a same-user Unix socket stored under `$XDG_RUNTIME_DIR/agemux` or `~/.local/run/agemux`, with directory mode `0700` and socket mode `0600`. Treat access to the local account as permission to control these agent sessions.
 
 Sessions that are already attached in another terminal are not force-detached by default. Close the old terminal first, or use `agemux attach --force NAME` when you intentionally want to take over an attached session.
 

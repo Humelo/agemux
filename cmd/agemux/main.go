@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,6 +34,7 @@ import (
 	"github.com/Humelo/agemux/internal/termkey"
 	"github.com/creack/pty"
 	"github.com/gofrs/flock"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -45,6 +48,11 @@ const (
 	attachStatePolls         = 6
 	attachStatePollDelay     = 100 * time.Millisecond
 	attachReconnectWindow    = time.Minute
+	defaultControlTimeout    = 5 * time.Second
+	defaultStartTimeout      = 10 * time.Second
+	controlOutputLimit       = 256 * 1024
+	controlRequestLimit      = 16 * 1024 * 1024
+	controlEnvelopeLimit     = 6*controlRequestLimit + 4096
 )
 
 var (
@@ -57,7 +65,262 @@ var (
 	shpoolBin        = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
 	codexBin         = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
 	attachRetrySleep = time.Sleep
+	waitControlReady = waitForControlReady
 )
+
+type controlRequest struct {
+	Op     string `json:"op"`
+	Text   string `json:"text,omitempty"`
+	Submit bool   `json:"submit,omitempty"`
+	Lines  int    `json:"lines,omitempty"`
+}
+
+type controlResponse struct {
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	Output string `json:"output,omitempty"`
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+type queuedWriter interface {
+	EnqueueTimeout([]byte, time.Duration) error
+}
+
+type ptyWriteRequest struct {
+	data     []byte
+	deadline time.Time
+	result   chan error
+}
+
+type ptyWriter struct {
+	fd       int
+	permit   chan struct{}
+	queue    chan ptyWriteRequest
+	done     chan struct{}
+	onError  func()
+	errMu    sync.Mutex
+	writeErr error
+}
+
+func newPTYWriter(ctx context.Context, fd int, onError ...func()) *ptyWriter {
+	permit := make(chan struct{}, 1)
+	permit <- struct{}{}
+	w := &ptyWriter{
+		fd:     fd,
+		permit: permit,
+		queue:  make(chan ptyWriteRequest, 1),
+		done:   make(chan struct{}),
+	}
+	if len(onError) > 0 {
+		w.onError = onError[0]
+	}
+	go w.run(ctx)
+	return w
+}
+
+func (w *ptyWriter) Write(data []byte) (int, error) {
+	return w.write(data, 0)
+}
+
+func (w *ptyWriter) EnqueueTimeout(data []byte, timeout time.Duration) error {
+	if err := w.err(); err != nil {
+		return err
+	}
+	request := ptyWriteRequest{
+		data:     append([]byte(nil), data...),
+		deadline: time.Now().Add(timeout),
+		result:   make(chan error, 1),
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case w.queue <- request:
+	case <-w.done:
+		if err := w.err(); err != nil {
+			return err
+		}
+		return io.ErrClosedPipe
+	case <-timer.C:
+		return os.ErrDeadlineExceeded
+	}
+
+	select {
+	case err := <-request.result:
+		return err
+	case <-w.done:
+		select {
+		case err := <-request.result:
+			return err
+		default:
+		}
+		if err := w.err(); err != nil {
+			return err
+		}
+		return io.ErrClosedPipe
+	}
+}
+
+func (w *ptyWriter) run(ctx context.Context) {
+	defer close(w.done)
+	for {
+		select {
+		case request := <-w.queue:
+			remaining := time.Until(request.deadline)
+			var err error
+			if remaining <= 0 {
+				err = os.ErrDeadlineExceeded
+			} else {
+				_, err = w.write(request.data, remaining)
+			}
+			request.result <- err
+			if err != nil {
+				w.errMu.Lock()
+				w.writeErr = err
+				w.errMu.Unlock()
+				if w.onError != nil {
+					w.onError()
+				}
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (w *ptyWriter) err() error {
+	w.errMu.Lock()
+	defer w.errMu.Unlock()
+	return w.writeErr
+}
+
+func (w *ptyWriter) write(data []byte, timeout time.Duration) (int, error) {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-w.permit:
+		case <-timer.C:
+			return 0, os.ErrDeadlineExceeded
+		}
+	} else {
+		<-w.permit
+	}
+	defer func() { w.permit <- struct{}{} }()
+
+	written := 0
+	for written < len(data) {
+		n, err := unix.Write(w.fd, data[written:])
+		if n > 0 {
+			written += n
+		}
+		if err == nil {
+			if n == 0 {
+				return written, io.ErrShortWrite
+			}
+			continue
+		}
+		if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) {
+			return written, err
+		}
+		if err := waitForFD(uintptr(w.fd), unix.POLLOUT, deadline); err != nil {
+			return written, err
+		}
+	}
+	return written, nil
+}
+
+func waitForFD(fd uintptr, events int16, deadline time.Time) error {
+	timeoutMillis := -1
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return os.ErrDeadlineExceeded
+		}
+		timeoutMillis = int((remaining + time.Millisecond - 1) / time.Millisecond)
+	}
+	for {
+		ready, err := unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: events}}, timeoutMillis)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if ready == 0 {
+			return os.ErrDeadlineExceeded
+		}
+		return nil
+	}
+}
+
+func (w *lockedWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	written := 0
+	for written < len(data) {
+		n, err := w.w.Write(data[written:])
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+type outputBuffer struct {
+	mu    sync.Mutex
+	data  []byte
+	limit int
+}
+
+func (b *outputBuffer) Append(data []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(data) >= b.limit {
+		b.data = append(b.data[:0], data[len(data)-b.limit:]...)
+		return
+	}
+	if overflow := len(b.data) + len(data) - b.limit; overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+	}
+	b.data = append(b.data, data...)
+}
+
+func (b *outputBuffer) Tail(lines int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := b.data
+	if lines > 0 && len(data) > 0 {
+		start := 0
+		i := len(data) - 1
+		if data[i] == '\n' {
+			i--
+		}
+		for ; i >= 0; i-- {
+			if data[i] == '\n' {
+				lines--
+				if lines == 0 {
+					start = i + 1
+					break
+				}
+			}
+		}
+		data = data[start:]
+	}
+	return string(append([]byte(nil), data...))
+}
 
 type metadata map[string]map[string]any
 
@@ -130,6 +393,12 @@ func runMain(argv []string) error {
 		return create("claude-resume")
 	case cmd == "claude-new":
 		return create("claude-fresh")
+	case cmd == "start":
+		return startCommand(argv[2:])
+	case cmd == "send":
+		return sendCommand(argv[2:])
+	case cmd == "capture":
+		return captureCommand(argv[2:])
 	case cmd == "codex-accounts":
 		return codexAccountsCommand(argv[2:])
 	case cmd == "claude-accounts":
@@ -160,6 +429,10 @@ func usage(prog string) {
   %[1]s codex-new        new shpool session running fresh Codex
   %[1]s claude           new shpool session running Claude resume picker
   %[1]s claude-new       new shpool session running fresh Claude
+  %[1]s start codex NAME [--resume UUID] [--background] [--root DIR]
+  %[1]s send NAME [TEXT]
+  %[1]s send NAME --file PATH
+  %[1]s capture NAME [--lines N]
   %[1]s codex-accounts   open the Codex account switcher
   %[1]s codex-accounts new [name]
   %[1]s codex-accounts change SELECTOR
@@ -389,6 +662,40 @@ func saveMetaUnlocked(meta metadata) error {
 	return os.Rename(tmp, metaFile)
 }
 
+func startLockPath(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return filepath.Join(dataDir, ".start-"+hex.EncodeToString(sum[:12])+".lock")
+}
+
+func withStartLock(name string, fn func() error) error {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return err
+	}
+	_ = os.Chmod(dataDir, 0700)
+	startLock := flock.New(startLockPath(name))
+	if err := startLock.Lock(); err != nil {
+		return err
+	}
+	defer startLock.Unlock()
+	return fn()
+}
+
+func startReservationTTL() time.Duration {
+	ttl := 2 * durationEnv("AGEMUX_START_TIMEOUT", defaultStartTimeout)
+	if ttl < time.Minute {
+		return time.Minute
+	}
+	return ttl
+}
+
+func startReservationActive(row map[string]any) bool {
+	startedAt, err := time.Parse(time.RFC3339Nano, stringValue(row["starting_at"]))
+	if err != nil {
+		return false
+	}
+	return time.Since(startedAt) < startReservationTTL()
+}
+
 func updateMeta(name string, fields map[string]any) error {
 	return withMetaLock(func(meta metadata) error {
 		row := meta[name]
@@ -436,7 +743,7 @@ func agemuxSessions() ([]map[string]any, error) {
 	err = withMetaLock(func(meta metadata) error {
 		for _, sess := range sessions {
 			name, _ := sess["name"].(string)
-			if !isAgemuxSessionName(name) {
+			if !isAgemuxSessionName(name) && meta[name] == nil {
 				continue
 			}
 			liveNames[name] = true
@@ -449,7 +756,7 @@ func agemuxSessions() ([]map[string]any, error) {
 		}
 		changed := false
 		for name := range meta {
-			if isAgemuxSessionName(name) && !liveNames[name] {
+			if !liveNames[name] && !startReservationActive(meta[name]) {
 				delete(meta, name)
 				changed = true
 			}
@@ -536,6 +843,10 @@ func splitKind(kind string) (string, string) {
 }
 
 func agentArgs(kind, root string) ([]string, error) {
+	return agentArgsWithMeta(kind, root, nil)
+}
+
+func agentArgsWithMeta(kind, root string, row map[string]any) ([]string, error) {
 	provider, mode := splitKind(kind)
 	switch {
 	case provider == "codex" && (mode == "resume" || mode == "fresh"):
@@ -547,8 +858,23 @@ func agentArgs(kind, root string) ([]string, error) {
 			args = append(args, "--no-alt-screen")
 		}
 		args = append(args, "-C", root)
+		if model := stringValue(row["model"]); model != "" {
+			args = append(args, "-m", model)
+		}
+		if effort := stringValue(row["reasoning_effort"]); effort != "" {
+			args = append(args, "-c", "model_reasoning_effort="+effort)
+		}
+		if tier := stringValue(row["service_tier"]); tier != "" {
+			args = append(args, "-c", "service_tier="+tier)
+		}
+		for _, config := range stringSliceValue(row["codex_config"]) {
+			args = append(args, "-c", config)
+		}
 		if mode == "resume" {
 			args = append(args, "resume")
+			if resumeID := stringValue(row["resume_id"]); resumeID != "" {
+				args = append(args, resumeID)
+			}
 		}
 		return args, nil
 	case provider == "claude" && (mode == "resume" || mode == "fresh"):
@@ -683,6 +1009,7 @@ func runCommand(name, kind, root string) string {
 		"AGEMUX_CLAUDE_DANGEROUS",
 		"AGEMUX_CODEX_BIN",
 		"AGEMUX_CODEX_DANGEROUS",
+		"AGEMUX_CONTROL_DIR",
 		"AGEMUX_DATA_DIR",
 		"AGEMUX_PREFIX",
 		"AGEMUX_SHPOOL_BIN",
@@ -735,6 +1062,10 @@ func execAttach(name, createKind string, force bool) error {
 		kind = sessionKind(name)
 	}
 	args = append(args, "--", name)
+	return runAttachLoop(name, kind, args)
+}
+
+func runAttachLoop(name, kind string, args []string) error {
 	provider, _ := splitKind(kind)
 	if provider == "codex" {
 		defer emitCodexKeyboardReset()
@@ -852,6 +1183,313 @@ func create(kind string) error {
 		name = nowName()
 	}
 	return execAttach(name, kind, false)
+}
+
+func startCommand(args []string) error {
+	if len(args) < 2 || args[0] != "codex" {
+		return fmt.Errorf("usage: agemux start codex NAME [--resume UUID] [--background] [--root DIR] [--model MODEL] [--effort LEVEL] [--service-tier TIER] [--config KEY=VALUE] [--title TITLE]")
+	}
+	name := args[1]
+	root := rootDir()
+	resumeID := ""
+	model := ""
+	effort := ""
+	serviceTier := ""
+	var configs []string
+	title := name
+	background := false
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--background", "-b":
+			background = true
+		case "--resume":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("--resume requires a UUID")
+			}
+			i++
+			resumeID = args[i]
+		case "--root":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("--root requires a directory")
+			}
+			i++
+			root = expandPath(args[i])
+		case "--model":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("--model requires a value")
+			}
+			i++
+			model = args[i]
+		case "--effort":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("--effort requires a value")
+			}
+			i++
+			effort = args[i]
+		case "--service-tier":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("--service-tier requires a value")
+			}
+			i++
+			serviceTier = args[i]
+		case "--config":
+			if i+1 >= len(args) || !strings.Contains(args[i+1], "=") {
+				return fmt.Errorf("--config requires KEY=VALUE")
+			}
+			i++
+			configs = append(configs, args[i])
+		case "--title":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("--title requires a value")
+			}
+			i++
+			title = args[i]
+		default:
+			return fmt.Errorf("unknown start option: %s", args[i])
+		}
+	}
+	return startNamedCodex(name, root, resumeID, model, effort, serviceTier, configs, title, background)
+}
+
+func startNamedCodex(name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background bool) error {
+	if err := ensureName(name); err != nil {
+		return err
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(absRoot)
+	if err != nil {
+		return fmt.Errorf("invalid root %q: %w", absRoot, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("root is not a directory: %s", absRoot)
+	}
+	kind := "codex-fresh"
+	if resumeID != "" {
+		kind = "codex-resume"
+	}
+	startToken := randomStartToken()
+	if err := reserveNamedCodexStart(name, kind, absRoot, resumeID, model, effort, serviceTier, configs, title, startToken); err != nil {
+		return err
+	}
+
+	args := []string{shpoolBin, "attach"}
+	if background {
+		args = append(args, "--background")
+	}
+	args = append(args, "--dir", absRoot, "--cmd", runCommand(name, kind, absRoot), "--", name)
+	if background {
+		startTimeout := durationEnv("AGEMUX_START_TIMEOUT", defaultStartTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			_ = cleanupReservedStart(name, startToken)
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("%s attach timed out after %s", shpoolBin, startTimeout)
+			}
+			return fmt.Errorf("%s attach failed: %s", shpoolBin, strings.TrimSpace(string(out)))
+		}
+		if readyErr := waitControlReady(name); readyErr != nil {
+			_ = cleanupReservedStart(name, startToken)
+			return readyErr
+		}
+		if err := finalizeReservedStart(name, startToken); err != nil {
+			_ = cleanupReservedStart(name, startToken)
+			return fmt.Errorf("finalize session metadata: %w", err)
+		}
+		fmt.Printf("started %s\n", name)
+		return nil
+	}
+	if err := runAttachLoop(name, kind, args); err != nil {
+		states, _ := liveSessionStates()
+		if _, live := states[name]; !live {
+			_ = cleanupReservedStart(name, startToken)
+		}
+		return err
+	}
+	return nil
+}
+
+func randomStartToken() string {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return hex.EncodeToString(value)
+}
+
+func reserveNamedCodexStart(name, kind, root, resumeID, model, effort, serviceTier string, configs []string, title, startToken string) error {
+	return withStartLock(name, func() error {
+		states, err := liveSessionStates()
+		if err != nil {
+			return err
+		}
+		if status, exists := states[name]; exists {
+			return fmt.Errorf("session %q is already live (%s)", name, status)
+		}
+
+		provider, _ := splitKind(kind)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		return withMetaLock(func(meta metadata) error {
+			if startReservationActive(meta[name]) {
+				return fmt.Errorf("session %q is already starting", name)
+			}
+			meta[name] = map[string]any{
+				"provider":         provider,
+				"kind":             kind,
+				"root":             root,
+				"title":            title,
+				"created_at":       now,
+				"starting_at":      now,
+				"start_token":      startToken,
+				"resume_id":        resumeID,
+				"model":            model,
+				"reasoning_effort": effort,
+				"service_tier":     serviceTier,
+				"codex_config":     configs,
+			}
+			return saveMetaUnlocked(meta)
+		})
+	})
+}
+
+func finalizeReservedStart(name, startToken string) error {
+	return withStartLock(name, func() error {
+		return withMetaLock(func(meta metadata) error {
+			row := meta[name]
+			if stringValue(row["start_token"]) != startToken {
+				return fmt.Errorf("session %q start ownership changed", name)
+			}
+			row["starting_at"] = nil
+			row["start_token"] = nil
+			return saveMetaUnlocked(meta)
+		})
+	})
+}
+
+func cleanupReservedStart(name, startToken string) error {
+	return withStartLock(name, func() error {
+		owned := false
+		if err := withMetaLock(func(meta metadata) error {
+			owned = stringValue(meta[name]["start_token"]) == startToken
+			return nil
+		}); err != nil || !owned {
+			return err
+		}
+		_ = exec.Command(shpoolBin, "kill", "--", name).Run()
+		return withMetaLock(func(meta metadata) error {
+			if stringValue(meta[name]["start_token"]) == startToken {
+				delete(meta, name)
+				return saveMetaUnlocked(meta)
+			}
+			return nil
+		})
+	})
+}
+
+func deleteSessionMeta(name string) error {
+	return withMetaLock(func(meta metadata) error {
+		delete(meta, name)
+		return saveMetaUnlocked(meta)
+	})
+}
+
+func waitForControlReady(name string) error {
+	timeout := durationEnv("AGEMUX_START_TIMEOUT", defaultStartTimeout)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := controlCall(name, controlRequest{Op: "capture", Lines: 1}); err == nil {
+			time.Sleep(250 * time.Millisecond)
+			if _, err := controlCall(name, controlRequest{Op: "capture", Lines: 1}); err == nil {
+				return nil
+			}
+		}
+		states, err := liveSessionStates()
+		if err == nil {
+			if _, live := states[name]; !live {
+				return fmt.Errorf("session %q exited before its control channel became ready", name)
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("session %q control channel was not ready within %s", name, timeout)
+}
+
+func sendCommand(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: agemux send NAME [TEXT] | agemux send NAME --file PATH")
+	}
+	name := args[0]
+	var text string
+	switch {
+	case len(args) == 3 && args[1] == "--file":
+		file, err := os.Open(args[2])
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		text, err = readControlInput(file)
+		if err != nil {
+			return err
+		}
+	case len(args) > 1:
+		text = strings.Join(args[1:], " ")
+	case term.IsTerminal(int(os.Stdin.Fd())):
+		return fmt.Errorf("provide TEXT, --file PATH, or pipe input on stdin")
+	default:
+		var err error
+		text, err = readControlInput(os.Stdin)
+		if err != nil {
+			return err
+		}
+	}
+	if text == "" {
+		return fmt.Errorf("refusing to send empty input")
+	}
+	if len(text) > controlRequestLimit {
+		return fmt.Errorf("input exceeds %d bytes", controlRequestLimit)
+	}
+	_, err := controlCall(name, controlRequest{Op: "send", Text: text, Submit: true})
+	return err
+}
+
+func readControlInput(reader io.Reader) (string, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, controlRequestLimit+1))
+	if err != nil {
+		return "", err
+	}
+	if len(content) > controlRequestLimit {
+		return "", fmt.Errorf("input exceeds %d bytes", controlRequestLimit)
+	}
+	return string(content), nil
+}
+
+func captureCommand(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: agemux capture NAME [--lines N]")
+	}
+	name := args[0]
+	lines := 120
+	if len(args) > 1 {
+		if len(args) != 3 || args[1] != "--lines" {
+			return fmt.Errorf("usage: agemux capture NAME [--lines N]")
+		}
+		parsed, err := strconv.Atoi(args[2])
+		if err != nil || parsed <= 0 || parsed > 10000 {
+			return fmt.Errorf("--lines must be between 1 and 10000")
+		}
+		lines = parsed
+	}
+	response, err := controlCall(name, controlRequest{Op: "capture", Lines: lines})
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(os.Stdout, response.Output)
+	return err
 }
 
 func printList() error {
@@ -1723,7 +2361,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.10")
+	req.Header.Set("User-Agent", "agemux/0.1.11")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -2421,6 +3059,23 @@ func stringValue(value any) string {
 	}
 }
 
+func stringSliceValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value := stringValue(item); value != "" {
+				values = append(values, value)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
+}
+
 func killSession(name string) error {
 	if _, err := requireAgemuxSession(name); err != nil {
 		return err
@@ -3063,6 +3718,142 @@ func (p *titleParser) feed(data []byte) {
 	}
 }
 
+func controlDirectory() string {
+	if dir := os.Getenv("AGEMUX_CONTROL_DIR"); dir != "" {
+		return expandPath(dir)
+	}
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return filepath.Join(dir, "agemux")
+	}
+	return filepath.Join(homeDir(), ".local", "run", "agemux")
+}
+
+func controlSocketPath(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return filepath.Join(controlDirectory(), hex.EncodeToString(sum[:12])+".sock")
+}
+
+func controlCall(name string, request controlRequest) (controlResponse, error) {
+	if err := ensureName(name); err != nil {
+		return controlResponse{}, err
+	}
+	timeout := durationEnv("AGEMUX_CONTROL_TIMEOUT", defaultControlTimeout)
+	conn, err := net.DialTimeout("unix", controlSocketPath(name), timeout)
+	if err != nil {
+		return controlResponse{}, fmt.Errorf("session %q has no active agemux control channel: %w", name, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return controlResponse{}, err
+	}
+	var response controlResponse
+	if err := json.NewDecoder(io.LimitReader(conn, controlEnvelopeLimit+1)).Decode(&response); err != nil {
+		return controlResponse{}, err
+	}
+	if !response.OK {
+		if response.Error == "" {
+			response.Error = "control request failed"
+		}
+		return response, errors.New(response.Error)
+	}
+	return response, nil
+}
+
+func startControlServer(ctx context.Context, name string, input io.Writer, output *outputBuffer) (func(), error) {
+	dir := controlDirectory()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return nil, err
+	}
+	path := controlSocketPath(name)
+	if conn, err := net.DialTimeout("unix", path, 100*time.Millisecond); err == nil {
+		conn.Close()
+		return nil, fmt.Errorf("control channel already exists for session %q", name)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		listener.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			_ = listener.Close()
+			_ = os.Remove(path)
+		})
+	}
+	go func() {
+		<-ctx.Done()
+		cleanup()
+	}()
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go handleControlConnection(conn, input, output)
+		}
+	}()
+	return cleanup, nil
+}
+
+func handleControlConnection(conn net.Conn, input io.Writer, output *outputBuffer) {
+	defer conn.Close()
+	timeout := durationEnv("AGEMUX_CONTROL_TIMEOUT", defaultControlTimeout)
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	var request controlRequest
+	if err := json.NewDecoder(io.LimitReader(conn, controlEnvelopeLimit+1)).Decode(&request); err != nil {
+		_ = json.NewEncoder(conn).Encode(controlResponse{Error: err.Error()})
+		return
+	}
+	response := controlResponse{OK: true}
+	switch request.Op {
+	case "send":
+		if request.Text == "" {
+			response.OK = false
+			response.Error = "refusing to send empty input"
+			break
+		}
+		if len(request.Text) > controlRequestLimit {
+			response.OK = false
+			response.Error = fmt.Sprintf("input exceeds %d bytes", controlRequestLimit)
+			break
+		}
+		payload := []byte("\033[200~" + request.Text + "\033[201~")
+		if request.Submit {
+			payload = append(payload, '\r')
+		}
+		var err error
+		if writer, ok := input.(queuedWriter); ok {
+			err = writer.EnqueueTimeout(payload, timeout/2)
+		} else {
+			_, err = input.Write(payload)
+		}
+		if err != nil {
+			response.OK = false
+			response.Error = err.Error()
+		}
+	case "capture":
+		response.Output = output.Tail(request.Lines)
+	default:
+		response.OK = false
+		response.Error = fmt.Sprintf("unknown control operation: %s", request.Op)
+	}
+	_ = json.NewEncoder(conn).Encode(response)
+}
+
 func runAgentSession(name, kind, root string) error {
 	if err := ensureName(name); err != nil {
 		return err
@@ -3071,23 +3862,43 @@ func runAgentSession(name, kind, root string) error {
 	if err == nil {
 		root = absRoot
 	}
-	args, err := agentArgs(kind, root)
+	configured := sessionMeta(name)
+	args, err := agentArgsWithMeta(kind, root, configured)
 	if err != nil {
 		return err
 	}
 	if err := registerSession(name, kind, root); err != nil {
 		return err
 	}
-	_ = updateMeta(name, map[string]any{"last_started_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	if title := stringValue(configured["title"]); title != "" {
+		_ = updateMeta(name, map[string]any{"title": title})
+	}
+	_ = updateMeta(name, map[string]any{
+		"last_started_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"starting_at":     nil,
+	})
 	terminalTitle(sessionTitle(name))
 
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = root
+	cmd.Env = os.Environ()
+	if termName := os.Getenv("TERM"); termName == "" || termName == "dumb" {
+		cmd.Env = upsertEnv(cmd.Env, "TERM", "xterm-256color")
+	}
 	ptmx, err := pty.StartWithSize(cmd, currentWindowSize())
 	if err != nil {
 		return err
 	}
 	defer ptmx.Close()
+	ptmxFD := int(ptmx.Fd())
+	if err := syscall.SetNonblock(ptmxFD, true); err != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		return err
+	}
+	defer syscall.SetNonblock(ptmxFD, false)
 
 	var oldState *term.State
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -3109,9 +3920,20 @@ func runAgentSession(name, kind, root string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	input := newPTYWriter(ctx, ptmxFD, cancel)
+	output := &outputBuffer{limit: controlOutputLimit}
+	stopControl, err := startControlServer(ctx, name, input, output)
+	if err != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		return err
+	}
+	defer stopControl()
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		go func() {
-			_, _ = io.Copy(ptmx, os.Stdin)
+			_, _ = io.Copy(input, os.Stdin)
 			cancel()
 		}()
 	}
@@ -3129,8 +3951,21 @@ relayLoop:
 		n, readErr := ptmx.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
+			output.Append(chunk)
 			parser.feed(chunk)
 			_, _ = os.Stdout.Write(chunk)
+		}
+		if errors.Is(readErr, syscall.EAGAIN) || errors.Is(readErr, syscall.EWOULDBLOCK) {
+			select {
+			case <-ctx.Done():
+				break relayLoop
+			default:
+			}
+			deadline := time.Now().Add(100 * time.Millisecond)
+			if pollErr := waitForFD(uintptr(ptmxFD), unix.POLLIN, deadline); pollErr != nil && !errors.Is(pollErr, os.ErrDeadlineExceeded) {
+				break
+			}
+			continue
 		}
 		if readErr != nil {
 			break
@@ -3140,6 +3975,9 @@ relayLoop:
 			break relayLoop
 		default:
 		}
+	}
+	if ctx.Err() != nil {
+		_ = ptmx.Close()
 	}
 	err = cmd.Wait()
 	var exitErr *exec.ExitError

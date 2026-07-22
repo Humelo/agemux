@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -148,6 +151,253 @@ func TestAgentArgsCanDisableDangerousPermissions(t *testing.T) {
 	}
 	if containsArg(claudeArgs, "--dangerously-skip-permissions") {
 		t.Fatalf("Claude dangerous flag should be disabled: %#v", claudeArgs)
+	}
+}
+
+func TestAgentArgsUseNamedResumeOptions(t *testing.T) {
+	args, err := agentArgsWithMeta("codex-resume", "/tmp/project", map[string]any{
+		"resume_id":        "019f-test",
+		"model":            "gpt-5.6-sol",
+		"reasoning_effort": "xhigh",
+		"service_tier":     "default",
+		"codex_config":     []any{"notice.hide_rate_limit_model_nudge=true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-m gpt-5.6-sol", "model_reasoning_effort=xhigh", "service_tier=default", "notice.hide_rate_limit_model_nudge=true", "resume 019f-test"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("named Codex args missing %q: %#v", want, args)
+		}
+	}
+	if args[len(args)-2] != "resume" || args[len(args)-1] != "019f-test" {
+		t.Fatalf("resume UUID must follow the resume subcommand: %#v", args)
+	}
+}
+
+func TestControlChannelSendsAndCaptures(t *testing.T) {
+	t.Setenv("AGEMUX_CONTROL_DIR", t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var input bytes.Buffer
+	writer := &lockedWriter{w: &input}
+	output := &outputBuffer{limit: controlOutputLimit}
+	output.Append([]byte("first\nsecond\nthird"))
+	stop, err := startControlServer(ctx, "agemux-control-test", writer, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	if _, err := controlCall("agemux-control-test", controlRequest{Op: "send", Text: "line one\nline two", Submit: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := input.String(), "\x1b[200~line one\nline two\x1b[201~\r"; got != want {
+		t.Fatalf("control input = %q, want %q", got, want)
+	}
+	response, err := controlCall("agemux-control-test", controlRequest{Op: "capture", Lines: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Output != "second\nthird" {
+		t.Fatalf("capture output = %q", response.Output)
+	}
+	if info, err := os.Stat(controlSocketPath("agemux-control-test")); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0600 {
+		t.Fatalf("control socket mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestOutputBufferTailPreservesNewlineTerminatedLastLine(t *testing.T) {
+	output := &outputBuffer{limit: controlOutputLimit}
+	output.Append([]byte("first\nsecond\nthird\n"))
+
+	if got, want := output.Tail(1), "third\n"; got != want {
+		t.Fatalf("tail output = %q, want %q", got, want)
+	}
+	if got, want := output.Tail(2), "second\nthird\n"; got != want {
+		t.Fatalf("two-line tail output = %q, want %q", got, want)
+	}
+}
+
+func TestReadControlInputRejectsOversizedContent(t *testing.T) {
+	_, err := readControlInput(strings.NewReader(strings.Repeat("x", controlRequestLimit+1)))
+	if err == nil || !strings.Contains(err.Error(), "input exceeds") {
+		t.Fatalf("expected bounded input error, got %v", err)
+	}
+}
+
+func TestPTYWriterReturnsWriteFailureBeforeAcknowledging(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	writerFD := int(writer.Fd())
+	if err := syscall.SetNonblock(writerFD, true); err != nil {
+		t.Fatal(err)
+	}
+
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	for {
+		if _, err := syscall.Write(writerFD, chunk); errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	input := newPTYWriter(ctx, writerFD)
+	if err := input.EnqueueTimeout([]byte("blocked"), 20*time.Millisecond); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected the blocked PTY write to fail before acknowledgement, got %v", err)
+	}
+	select {
+	case <-input.done:
+	case <-time.After(time.Second):
+		t.Fatal("PTY writer remained live after a timed-out write")
+	}
+}
+
+func TestUpsertEnvReplacesTerminal(t *testing.T) {
+	env := upsertEnv([]string{"PATH=/bin", "TERM=dumb", "HOME=/tmp/home"}, "TERM", "xterm-256color")
+	if got := strings.Join(env, "\n"); strings.Count(got, "TERM=") != 1 || !strings.Contains(got, "TERM=xterm-256color") {
+		t.Fatalf("terminal environment was not replaced: %#v", env)
+	}
+}
+
+func TestStartNamedCodexCreatesBackgroundSession(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	argsFile := filepath.Join(dir, "args")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n"+
+			"printf '%s\\n' \"$*\" > "+shellQuote(argsFile)+"\n",
+	)
+	withShpoolBin(t, fake)
+	withoutControlReadyWait(t)
+
+	root := filepath.Join(dir, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := startNamedCodex("scheduled-story", root, "019f-story", "gpt-5.6-sol", "xhigh", "default", []string{"notice.hide_rate_limit_model_nudge=true"}, "Story translation", true); err != nil {
+		t.Fatal(err)
+	}
+	called, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"attach --background", "--dir " + root, "--cmd", "-- scheduled-story"} {
+		if !strings.Contains(string(called), want) {
+			t.Fatalf("shpool args missing %q: %q", want, string(called))
+		}
+	}
+	row := sessionMeta("scheduled-story")
+	if row["resume_id"] != "019f-story" || row["model"] != "gpt-5.6-sol" || row["title"] != "Story translation" {
+		t.Fatalf("unexpected named-session metadata: %#v", row)
+	}
+}
+
+func TestRegisteredNamedSessionIsOwnedWithoutPrefix(t *testing.T) {
+	dir := t.TempDir()
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"scheduled-story\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, dir)
+	if err := registerSession("scheduled-story", "codex-resume", "/tmp/project"); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := agemuxSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || stringValue(sessions[0]["name"]) != "scheduled-story" {
+		t.Fatalf("registered named session was not owned: %#v", sessions)
+	}
+}
+
+func TestStartingReservationSurvivesListBeforeShpoolAppears(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	fake := fakeShpoolScript(t, "if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n")
+	withShpoolBin(t, fake)
+
+	if err := reserveNamedCodexStart("scheduled-starting", "codex-resume", dir, "resume-id", "", "", "", nil, "Starting", "token-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agemuxSessions(); err != nil {
+		t.Fatal(err)
+	}
+	if row := sessionMeta("scheduled-starting"); !startReservationActive(row) {
+		t.Fatalf("starting metadata was removed before shpool appeared: %#v", row)
+	}
+	if err := reserveNamedCodexStart("scheduled-starting", "codex-resume", dir, "resume-id", "", "", "", nil, "Starting", "token-two"); err == nil || !strings.Contains(err.Error(), "already starting") {
+		t.Fatalf("duplicate start reservation was not rejected: %v", err)
+	}
+}
+
+func TestOldStartCleanupDoesNotDeleteNewReservation(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	fake := fakeShpoolScript(t, "if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n")
+	withShpoolBin(t, fake)
+
+	if err := reserveNamedCodexStart("scheduled-retry", "codex-resume", dir, "resume-id", "", "", "", nil, "Retry", "old-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateMeta("scheduled-retry", map[string]any{"starting_at": time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserveNamedCodexStart("scheduled-retry", "codex-resume", dir, "resume-id", "", "", "", nil, "Retry", "new-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupReservedStart("scheduled-retry", "old-token"); err != nil {
+		t.Fatal(err)
+	}
+	if row := sessionMeta("scheduled-retry"); row["start_token"] != "new-token" {
+		t.Fatalf("old cleanup changed the new reservation: %#v", row)
+	}
+}
+
+func TestStartNamedCodexFailsWhenControlChannelNeverStarts(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n"+
+			"printf '%s\\n' \"$*\" >> "+shellQuote(calls)+"\n",
+	)
+	withShpoolBin(t, fake)
+	t.Setenv("AGEMUX_CONTROL_DIR", filepath.Join(dir, "control"))
+
+	root := filepath.Join(dir, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	err := startNamedCodex("scheduled-failure", root, "resume-id", "", "", "", nil, "Failure", true)
+	if err == nil || !strings.Contains(err.Error(), "exited before its control channel became ready") {
+		t.Fatalf("unexpected readiness result: %v", err)
+	}
+	content, readErr := os.ReadFile(calls)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(content), "attach --background") || !strings.Contains(string(content), "kill -- scheduled-failure") {
+		t.Fatalf("failed session was not cleaned up: %q", content)
+	}
+	if row := sessionMeta("scheduled-failure"); len(row) != 0 {
+		t.Fatalf("failed session metadata remains: %#v", row)
 	}
 }
 
@@ -461,6 +711,15 @@ func withoutAttachRetryDelay(t *testing.T) {
 	attachRetrySleep = func(time.Duration) {}
 	t.Cleanup(func() {
 		attachRetrySleep = old
+	})
+}
+
+func withoutControlReadyWait(t *testing.T) {
+	t.Helper()
+	old := waitControlReady
+	waitControlReady = func(string) error { return nil }
+	t.Cleanup(func() {
+		waitControlReady = old
 	})
 }
 

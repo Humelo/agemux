@@ -1,9 +1,9 @@
 {
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Persistent Codex and Claude sessions with built-in account views",
   "homepage": "https://github.com/Humelo/agemux",
   "license": "MIT",
-  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.10/agemux_0.1.10_windows_amd64.zip",
+  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.11/agemux_0.1.11_windows_amd64.zip",
   "hash": "REPLACE_WITH_RELEASE_SHA256",
   "bin": [
     [

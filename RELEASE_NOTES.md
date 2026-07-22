@@ -1,21 +1,23 @@
-# Agent Multiplexer v0.1.10
+# Agent Multiplexer v0.1.11
 
-Non-destructive session detach controls.
+Named background Codex sessions and safe local automation controls.
 
-- Press `d` on a session in the main picker to detach its terminal without stopping the agent.
-- Run `agemux detach NAME` for the same behavior in scripts or another shell.
-- Keeps agemux metadata intact so detached sessions remain available for later reattachment.
-- Treats already-disconnected sessions as a safe no-op.
-- Shows disconnected state explicitly in the session list while retaining confirmed `k` kill behavior.
+- Start a deterministic Codex session with `agemux start codex NAME`.
+- Resume an exact Codex conversation with `--resume SESSION_UUID`.
+- Use `--background` to create the shpool session without attaching a terminal.
+- Send a submitted prompt with `agemux send NAME`, either as an argument, stdin, or `--file PATH`.
+- Read recent PTY output with `agemux capture NAME --lines N` for scheduler health checks.
+- Keep external input independent of shpool attachment state, so automation does not take over an attached terminal.
+- Protect each local control socket with same-user filesystem permissions.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.11/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.10/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.11/scripts/install.sh | bash -s -- --with-codex-lb
 ```
