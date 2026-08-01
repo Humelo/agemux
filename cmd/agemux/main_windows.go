@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Humelo/agemux/internal/claudeaccounts"
+	"github.com/Humelo/agemux/internal/terminalstate"
 )
 
 type windowsCodexAccount struct {
@@ -23,6 +25,14 @@ type windowsCodexAccount struct {
 }
 
 func main() {
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	go func() {
+		<-interrupts
+		terminalstate.RestoreActive()
+		os.Exit(130)
+	}()
 	if len(os.Args) > 1 && os.Args[1] == "claude-accounts" {
 		if err := claudeaccounts.RunMain(append([]string{"agemux claude-accounts"}, os.Args[2:]...)); err != nil {
 			if code, ok := err.(claudeaccounts.ExitCodeError); ok {

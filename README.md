@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.12/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.12/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.12/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.12/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -56,6 +56,7 @@ agemux claude-accounts list
 agemux list
 agemux attach NAME
 agemux detach NAME
+agemux restart NAME
 agemux attach --force NAME
 agemux kill NAME
 ```
@@ -69,6 +70,7 @@ agemux kill NAME
 - `Enter` on `Codex accounts`: switch the active Codex CLI auth file or choose `+ Add Codex account`
 - `Enter` on `Claude accounts`: open the Claude account picker
 - `d`: detach the selected terminal while keeping its agent session running
+- `r`: restart the selected Codex session on its exact thread UUID
 - `k`: kill selected persistent session after confirmation
 
 Close the terminal tab to detach. The underlying session keeps running in `shpool`.
@@ -94,7 +96,9 @@ The control channel is a same-user Unix socket stored under `$XDG_RUNTIME_DIR/ag
 
 Sessions that are already attached in another terminal are not force-detached by default. Close the old terminal first, or use `agemux attach --force NAME` when you intentionally want to take over an attached session.
 
-If `shpool attach` exits while the session is still live and disconnected, agemux automatically reconnects with bounded backoff. It stops after five consecutive failures, but resets that budget after a stable minute so isolated interruptions do not accumulate over a long-running terminal.
+If `shpool attach` exits while the session is still live and disconnected, agemux automatically reconnects up to three times with bounded backoff. The retry budget resets after a stable minute so isolated interruptions do not accumulate over a long-running terminal. agemux also resets bracketed paste, focus tracking, modify-other-keys, and the full Kitty keyboard-protocol stack at TUI and attachment boundaries so a crashed nested CLI does not leak escape sequences into the shell.
+
+`agemux restart NAME` and the interactive `r` key stop the selected Codex process and immediately resume the same root thread by UUID. This bypasses the slower Codex resume picker and preserves the session root, title, model, reasoning effort, service tier, and extra Codex config stored by agemux. Restart ignores open subagent rollout files and is limited to sessions whose exact root thread UUID can be verified before the old process is stopped. Resume starts and restarts are serialized by UUID and refuse a thread already owned by another live or starting agemux session, preventing stale titles and concurrent schedulers from launching duplicate agents.
 
 When an explicit kill finds a stale disconnected shpool entry whose child process has already exited, agemux repairs the stale entry and retries the kill once. Attached sessions do not enter this recovery path.
 

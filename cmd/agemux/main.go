@@ -31,6 +31,7 @@ import (
 	"unicode"
 
 	claudeaccounts "github.com/Humelo/agemux/internal/claudeaccounts"
+	"github.com/Humelo/agemux/internal/terminalstate"
 	"github.com/Humelo/agemux/internal/termkey"
 	"github.com/creack/pty"
 	"github.com/gofrs/flock"
@@ -39,17 +40,16 @@ import (
 )
 
 const (
-	// Focus tracking is deliberately omitted: enabling it before shpool finishes
-	// attaching can queue ESC[I events that later appear in Codex's composer.
-	codexKeyboardSetup       = "\033[?2004h\033[>4;0m\033[>7u"
-	codexKeyboardReset       = "\033[?1004l\033[?2004l\033[<u"
 	defaultShpoolListTimeout = 5 * time.Second
-	maxAttachReconnects      = 5
-	attachStatePolls         = 6
+	maxAttachReconnects      = 3
+	attachStatePolls         = 30
 	attachStatePollDelay     = 100 * time.Millisecond
+	attachStateProbeTimeout  = 250 * time.Millisecond
+	attachStateWait          = 3 * time.Second
 	attachReconnectWindow    = time.Minute
 	defaultControlTimeout    = 5 * time.Second
 	defaultStartTimeout      = 10 * time.Second
+	codexThreadTrackInterval = 2 * time.Second
 	controlOutputLimit       = 256 * 1024
 	controlRequestLimit      = 16 * 1024 * 1024
 	controlEnvelopeLimit     = 6*controlRequestLimit + 4096
@@ -62,10 +62,12 @@ var (
 	lockFile         = filepath.Join(dataDir, "sessions.lock")
 	titleRE          = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
 	nameRE           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
+	threadIDRE       = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	shpoolBin        = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
 	codexBin         = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
 	attachRetrySleep = time.Sleep
 	waitControlReady = waitForControlReady
+	discoverThreadID = discoverCodexThreadID
 )
 
 type controlRequest struct {
@@ -364,16 +366,58 @@ type codexAccountState struct {
 }
 
 func main() {
+	stopSignals := installTerminalSignalCleanup()
+	exitCode := 0
 	if err := runMain(os.Args); err != nil {
 		if code, ok := err.(claudeaccounts.ExitCodeError); ok {
-			os.Exit(int(code))
+			exitCode = int(code)
+		} else if code, ok := err.(exitCodeError); ok {
+			exitCode = int(code)
+		} else {
+			fmt.Fprintln(os.Stderr, "agemux:", err)
+			exitCode = 1
 		}
-		if code, ok := err.(exitCodeError); ok {
-			os.Exit(int(code))
-		}
-		fmt.Fprintln(os.Stderr, "agemux:", err)
-		os.Exit(1)
 	}
+	terminalstate.RestoreActive()
+	stopSignals()
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+func installTerminalSignalCleanup() func() {
+	stdinFD := int(os.Stdin.Fd())
+	stdinFlags, stdinFlagsErr := unix.FcntlInt(uintptr(stdinFD), unix.F_GETFL, 0)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	stopped := make(chan struct{})
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			signal.Stop(signals)
+			close(stopped)
+		})
+	}
+	go func() {
+		select {
+		case received := <-signals:
+			terminalstate.RestoreActive()
+			if stdinFlagsErr == nil {
+				_, _ = unix.FcntlInt(uintptr(stdinFD), unix.F_SETFL, stdinFlags)
+			}
+			if term.IsTerminal(int(os.Stdout.Fd())) {
+				terminalstate.ResetAttachment(os.Stdout)
+			}
+			stop()
+			signal.Reset(received)
+			if unixSignal, ok := received.(syscall.Signal); ok {
+				_ = syscall.Kill(os.Getpid(), unixSignal)
+			}
+			os.Exit(1)
+		case <-stopped:
+		}
+	}()
+	return stop
 }
 
 func runMain(argv []string) error {
@@ -411,6 +455,8 @@ func runMain(argv []string) error {
 		return execAttach(argv[3], "", true)
 	case cmd == "detach" && len(argv) == 3:
 		return detachSession(argv[2])
+	case cmd == "restart" && len(argv) == 3:
+		return restartCodexSession(argv[2])
 	case cmd == "kill" && len(argv) == 3:
 		return killSession(argv[2])
 	case cmd == "run" && len(argv) == 5:
@@ -442,9 +488,10 @@ func usage(prog string) {
   %[1]s attach NAME      attach to a live session
   %[1]s attach --force NAME
   %[1]s detach NAME      detach a session without stopping it
+  %[1]s restart NAME     restart the exact Codex thread in place
   %[1]s kill NAME        kill a session
 
-Interactive keys: Arrows, Enter, c, C, l, L, d detach, k kill, q/Esc.
+Interactive keys: Arrows, Enter, c, C, l, L, d detach, r restart, k kill, q/Esc.
 Close the VS Code terminal tab to detach without killing the agent.
 Already-attached sessions are not force-detached by default; use attach --force intentionally.
 Codex and Claude run with their dangerous permission bypass flags by default.
@@ -680,6 +727,10 @@ func withStartLock(name string, fn func() error) error {
 	return fn()
 }
 
+func withCodexThreadLock(threadID string, fn func() error) error {
+	return withStartLock("codex-thread:"+strings.ToLower(threadID), fn)
+}
+
 func startReservationTTL() time.Duration {
 	ttl := 2 * durationEnv("AGEMUX_START_TIMEOUT", defaultStartTimeout)
 	if ttl < time.Minute {
@@ -712,6 +763,10 @@ func updateMeta(name string, fields map[string]any) error {
 
 func shpoolSessions() ([]map[string]any, error) {
 	timeout := durationEnv("AGEMUX_SHPOOL_LIST_TIMEOUT", defaultShpoolListTimeout)
+	return shpoolSessionsWithTimeout(timeout)
+}
+
+func shpoolSessionsWithTimeout(timeout time.Duration) ([]map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -796,6 +851,15 @@ func liveSessionNames() (map[string]bool, error) {
 
 func liveSessionStates() (map[string]string, error) {
 	sessions, err := shpoolSessions()
+	return sessionStates(sessions, err)
+}
+
+func liveSessionStatesWithTimeout(timeout time.Duration) (map[string]string, error) {
+	sessions, err := shpoolSessionsWithTimeout(timeout)
+	return sessionStates(sessions, err)
+}
+
+func sessionStates(sessions []map[string]any, err error) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -994,11 +1058,11 @@ func emitSessionTitle(name string) {
 }
 
 func emitCodexKeyboardSetup() {
-	fmt.Print(codexKeyboardSetup)
+	fmt.Print(terminalstate.CodexKeyboardSetup)
 }
 
 func emitCodexKeyboardReset() {
-	fmt.Print(codexKeyboardReset)
+	terminalstate.Reset(os.Stdout)
 }
 
 func runCommand(name, kind, root string) string {
@@ -1067,16 +1131,16 @@ func execAttach(name, createKind string, force bool) error {
 
 func runAttachLoop(name, kind string, args []string) error {
 	provider, _ := splitKind(kind)
-	if provider == "codex" {
-		defer emitCodexKeyboardReset()
-	}
+	defer terminalstate.ResetAttachment(os.Stdout)
 	reconnects := 0
 	for {
 		if provider == "codex" {
+			terminalstate.ResetAttachment(os.Stdout)
 			emitCodexKeyboardSetup()
 		}
 		attachedAt := time.Now()
 		err := runForeground(args)
+		terminalstate.ResetAttachment(os.Stdout)
 		if err == nil {
 			return nil
 		}
@@ -1100,9 +1164,18 @@ func shouldReconnectAttach(name string, attachErr error) bool {
 	if !errors.As(attachErr, &code) || int(code) != 1 {
 		return false
 	}
-	for poll := 0; poll < attachStatePolls; poll++ {
-		states, err := liveSessionStates()
+	deadline := time.Now().Add(attachStateWait)
+	for poll := 0; poll < attachStatePolls && time.Now().Before(deadline); poll++ {
+		probeTimeout := time.Until(deadline)
+		if probeTimeout > attachStateProbeTimeout {
+			probeTimeout = attachStateProbeTimeout
+		}
+		states, err := liveSessionStatesWithTimeout(probeTimeout)
 		if err != nil {
+			if poll+1 < attachStatePolls {
+				attachRetrySleep(attachStatePollDelay)
+				continue
+			}
 			return false
 		}
 		status, live := states[name]
@@ -1252,6 +1325,10 @@ func startCommand(args []string) error {
 }
 
 func startNamedCodex(name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background bool) error {
+	return startNamedCodexWithAnnouncement(name, root, resumeID, model, effort, serviceTier, configs, title, background, true)
+}
+
+func startNamedCodexWithAnnouncement(name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background, announce bool) error {
 	if err := ensureName(name); err != nil {
 		return err
 	}
@@ -1266,6 +1343,25 @@ func startNamedCodex(name, root, resumeID, model, effort, serviceTier string, co
 	if !info.IsDir() {
 		return fmt.Errorf("root is not a directory: %s", absRoot)
 	}
+	launch := func() error {
+		return startNamedCodexPrepared(name, absRoot, resumeID, model, effort, serviceTier, configs, title, background, announce)
+	}
+	if resumeID == "" {
+		return launch()
+	}
+	return withCodexThreadLock(resumeID, func() error {
+		owners, err := otherCodexThreadOwners(name, resumeID)
+		if err != nil {
+			return fmt.Errorf("check Codex thread ownership: %w", err)
+		}
+		if len(owners) > 0 {
+			return fmt.Errorf("Codex thread %s is already owned by live agemux session(s): %s", resumeID, strings.Join(owners, ", "))
+		}
+		return launch()
+	})
+}
+
+func startNamedCodexPrepared(name, absRoot, resumeID, model, effort, serviceTier string, configs []string, title string, background, announce bool) error {
 	kind := "codex-fresh"
 	if resumeID != "" {
 		kind = "codex-resume"
@@ -1301,7 +1397,9 @@ func startNamedCodex(name, root, resumeID, model, effort, serviceTier string, co
 			_ = cleanupReservedStart(name, startToken)
 			return fmt.Errorf("finalize session metadata: %w", err)
 		}
-		fmt.Printf("started %s\n", name)
+		if announce {
+			fmt.Printf("started %s\n", name)
+		}
 		return nil
 	}
 	if err := runAttachLoop(name, kind, args); err != nil {
@@ -1629,10 +1727,7 @@ func codexAccountsInteractive() error {
 		}
 		return printCodexAccounts(accounts)
 	}
-	if len(accounts) > 0 {
-		runCodexLoadingRefresh(accounts)
-	}
-	action, err := codexAccountPicker(accounts)
+	action, err := codexAccountPickerWithScreen(accounts)
 	if err != nil || action.Action == "" {
 		return err
 	}
@@ -1654,6 +1749,22 @@ func codexAccountsInteractive() error {
 		return runCodexSubcommandWithAccount(*action.Account, []string{"login", "status"})
 	}
 	return nil
+}
+
+func codexAccountPickerWithScreen(accounts []codexAccount) (codexAccountAction, error) {
+	screen, err := terminalstate.BeginScreen(os.Stdin, os.Stdout)
+	if err != nil {
+		return codexAccountAction{}, err
+	}
+	defer screen.Close()
+	keys := termkey.NewReader(os.Stdin)
+	if len(accounts) > 0 {
+		runCodexLoadingRefresh(accounts)
+		if err := keys.Drain(); err != nil {
+			return codexAccountAction{}, err
+		}
+	}
+	return codexAccountPicker(accounts, keys)
 }
 
 func codexAccountLabel(acc codexAccount) string {
@@ -2246,15 +2357,6 @@ func runCodexLoadingRefresh(accounts []codexAccount) {
 	if len(accounts) == 0 || truthyEnv("AGEMUX_CODEX_USAGE_DISABLE") {
 		return
 	}
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		enrichCodexAccountUsage(accounts)
-		return
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-	fmt.Print("\033[?25l\033[?1049h")
-	defer fmt.Print("\033[?1049l\033[?25h")
-
 	done := make(chan struct{})
 	var mu sync.Mutex
 	active := map[int]string{}
@@ -2361,7 +2463,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.12")
+	req.Header.Set("User-Agent", "agemux/0.1.13")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -2546,15 +2648,7 @@ func formatNumberField(data map[string]any, key string) string {
 	}
 }
 
-func codexAccountPicker(accounts []codexAccount) (codexAccountAction, error) {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return codexAccountAction{}, err
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-	fmt.Print("\033[?25l\033[?1049h")
-	defer fmt.Print("\033[?1049l\033[?25h")
-
+func codexAccountPicker(accounts []codexAccount, keys *termkey.Reader) (codexAccountAction, error) {
 	selected := 0
 	for i, acc := range accounts {
 		if acc.Current {
@@ -2562,10 +2656,9 @@ func codexAccountPicker(accounts []codexAccount) (codexAccountAction, error) {
 			break
 		}
 	}
-	buf := make([]byte, 16)
 	for {
 		drawCodexAccountPicker(accounts, selected)
-		key, err := termkey.Read(os.Stdin, buf)
+		key, err := keys.Read()
 		if err != nil {
 			return codexAccountAction{}, err
 		}
@@ -2597,7 +2690,7 @@ func codexAccountPicker(accounts []codexAccount) (codexAccountAction, error) {
 				continue
 			}
 			accountIndex := selected - 1
-			if confirm(fmt.Sprintf("Delete %s from Codex accounts? y/N", codexAccountLabel(accounts[accountIndex]))) {
+			if confirm(fmt.Sprintf("Delete %s from Codex accounts? y/N", codexAccountLabel(accounts[accountIndex])), keys) {
 				if _, err := deleteCodexAccount(accounts[accountIndex]); err != nil {
 					return codexAccountAction{}, err
 				}
@@ -3076,6 +3169,405 @@ func stringSliceValue(value any) []string {
 	}
 }
 
+func restartCodexSession(name string) error {
+	session, err := requireAgemuxSession(name)
+	if err != nil {
+		return err
+	}
+	meta, _ := session["meta"].(map[string]any)
+	kind := stringValue(meta["kind"])
+	provider, _ := splitKind(kind)
+	if provider != "codex" {
+		return fmt.Errorf("session %q is not a Codex session", name)
+	}
+	resumeID := discoverThreadID(name)
+	if !validThreadID(resumeID) {
+		return fmt.Errorf("could not determine the active Codex thread UUID for %q; keep the session running and try again", name)
+	}
+
+	root := stringValue(meta["root"])
+	if root == "" {
+		return fmt.Errorf("session %q is missing its recorded root; restart refused before stopping the active agent", name)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("invalid root %q: %w", root, err)
+	}
+	info, err := os.Stat(absRoot)
+	if err != nil {
+		return fmt.Errorf("invalid root %q: %w", absRoot, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("root is not a directory: %s", absRoot)
+	}
+	root = absRoot
+	title := stringValue(meta["title"])
+	if title == "" {
+		title = name
+	}
+	model := stringValue(meta["model"])
+	effort := stringValue(meta["reasoning_effort"])
+	serviceTier := stringValue(meta["service_tier"])
+	configs := stringSliceValue(meta["codex_config"])
+	return withCodexThreadLock(resumeID, func() error {
+		owners, err := otherCodexThreadOwners(name, resumeID)
+		if err != nil {
+			return fmt.Errorf("check Codex thread ownership: %w", err)
+		}
+		if len(owners) > 0 {
+			return fmt.Errorf(
+				"session %q shares Codex thread %s with live agemux session(s): %s; restart refused to avoid duplicate agents",
+				name,
+				resumeID,
+				strings.Join(owners, ", "),
+			)
+		}
+
+		if err := killSession(name); err != nil {
+			return err
+		}
+		if err := startNamedCodexPrepared(name, root, resumeID, model, effort, serviceTier, configs, title, true, false); err != nil {
+			return fmt.Errorf("restart %q on Codex thread %s failed: %w; recover with %s", name, resumeID, err, shellJoin(restartRecoveryCommand(name, root, resumeID, model, effort, serviceTier, configs, title)))
+		}
+		fmt.Printf("restarted %s as Codex thread %s\n", name, resumeID)
+		return nil
+	})
+}
+
+func restartRecoveryCommand(name, root, resumeID, model, effort, serviceTier string, configs []string, title string) []string {
+	args := []string{executablePath(), "start", "codex", name, "--resume", resumeID, "--background", "--root", root}
+	for _, pair := range []struct{ flag, value string }{
+		{"--model", model},
+		{"--effort", effort},
+		{"--service-tier", serviceTier},
+		{"--title", title},
+	} {
+		if pair.value != "" {
+			args = append(args, pair.flag, pair.value)
+		}
+	}
+	for _, config := range configs {
+		args = append(args, "--config", config)
+	}
+	return args
+}
+
+func validThreadID(value string) bool {
+	match := threadIDRE.FindString(value)
+	return match != "" && strings.EqualFold(match, value)
+}
+
+func otherCodexThreadOwners(name, threadID string) ([]string, error) {
+	sessions, err := agemuxSessions()
+	if err != nil {
+		return nil, err
+	}
+	owners := map[string]bool{}
+	for _, session := range sessions {
+		otherName := stringValue(session["name"])
+		if otherName == "" || otherName == name {
+			continue
+		}
+		meta, _ := session["meta"].(map[string]any)
+		provider, _ := splitKind(stringValue(meta["kind"]))
+		otherThreadID := discoverThreadID(otherName)
+		if !validThreadID(otherThreadID) {
+			if provider != "codex" {
+				continue
+			}
+			otherThreadID = stringValue(meta["resume_id"])
+		}
+		if !strings.EqualFold(otherThreadID, threadID) {
+			continue
+		}
+		owners[otherName] = true
+	}
+	if err := withMetaLock(func(meta metadata) error {
+		for otherName, row := range meta {
+			if otherName == name || !startReservationActive(row) {
+				continue
+			}
+			provider, _ := splitKind(stringValue(row["kind"]))
+			if provider == "codex" && strings.EqualFold(stringValue(row["resume_id"]), threadID) {
+				owners[otherName] = true
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(owners))
+	for owner := range owners {
+		result = append(result, owner)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func discoverCodexThreadID(name string) string {
+	pid := findCodexAgentPID(name)
+	if pid == 0 {
+		return ""
+	}
+	return codexThreadIDForPID(pid)
+}
+
+func codexThreadIDForPID(pid int) string {
+	var paths []string
+	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	if entries, err := os.ReadDir(fdDir); err == nil {
+		for _, entry := range entries {
+			target, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
+			if err == nil {
+				paths = append(paths, target)
+			}
+		}
+		return rootCodexThreadID(paths)
+	}
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-Fn").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			paths = append(paths, strings.TrimPrefix(line, "n"))
+		}
+	}
+	return rootCodexThreadID(paths)
+}
+
+func codexThreadIDFromRolloutPath(path string) string {
+	cleanPath := strings.TrimSuffix(path, " (deleted)")
+	if !strings.HasSuffix(cleanPath, ".jsonl") {
+		return ""
+	}
+	parts := strings.Split(filepath.ToSlash(cleanPath), "/")
+	hasSessionsDir := false
+	for idx, part := range parts {
+		if part == "sessions" && len(parts)-idx >= 5 {
+			hasSessionsDir = true
+			break
+		}
+	}
+	if !hasSessionsDir {
+		return ""
+	}
+	matches := threadIDRE.FindAllString(filepath.Base(cleanPath), -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return strings.ToLower(matches[len(matches)-1])
+}
+
+func rootCodexThreadID(paths []string) string {
+	rootIDs := map[string]bool{}
+	for _, path := range paths {
+		threadID := codexThreadIDFromRolloutPath(path)
+		if threadID == "" || !isRootCodexRollout(path, threadID) {
+			continue
+		}
+		rootIDs[threadID] = true
+	}
+	if len(rootIDs) != 1 {
+		return ""
+	}
+	for threadID := range rootIDs {
+		return threadID
+	}
+	return ""
+}
+
+func isRootCodexRollout(path, threadID string) bool {
+	path = strings.TrimSuffix(path, " (deleted)")
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 256*1024)
+	if !scanner.Scan() {
+		return false
+	}
+	var event struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID             string          `json:"id"`
+			ParentThreadID json.RawMessage `json:"parent_thread_id"`
+			Source         json.RawMessage `json:"source"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Type != "session_meta" || !strings.EqualFold(event.Payload.ID, threadID) {
+		return false
+	}
+	parent := strings.TrimSpace(string(event.Payload.ParentThreadID))
+	if parent != "" && parent != "null" && parent != `""` {
+		return false
+	}
+	var source map[string]json.RawMessage
+	if json.Unmarshal(event.Payload.Source, &source) == nil && source["subagent"] != nil {
+		return false
+	}
+	return true
+}
+
+func findCodexAgentPID(name string) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return findCodexAgentPIDWithPS(name)
+	}
+	runnerPID := 0
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		args := procArgs(pid)
+		if len(args) >= 3 && filepath.Base(args[0]) == "agemux" && args[1] == "run" && args[2] == name {
+			runnerPID = pid
+			break
+		}
+	}
+	if runnerPID == 0 {
+		return 0
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || procParentPID(pid) != runnerPID {
+			continue
+		}
+		args := procArgs(pid)
+		if len(args) > 0 && isCodexExecutable(args[0]) {
+			return pid
+		}
+	}
+	return 0
+}
+
+func procArgs(pid int) []string {
+	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return nil
+	}
+	var args []string
+	for _, value := range bytes.Split(content, []byte{0}) {
+		if len(value) > 0 {
+			args = append(args, string(value))
+		}
+	}
+	return args
+}
+
+func procParentPID(pid int) int {
+	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			parent, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:")))
+			return parent
+		}
+	}
+	return 0
+}
+
+func findCodexAgentPIDWithPS(name string) int {
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return 0
+	}
+	runnerPID := 0
+	type processRow struct {
+		pid, parent int
+		command     string
+	}
+	var rows []processRow
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		parent, parentErr := strconv.Atoi(fields[1])
+		if pidErr != nil || parentErr != nil {
+			continue
+		}
+		command := strings.Join(fields[2:], " ")
+		rows = append(rows, processRow{pid: pid, parent: parent, command: command})
+		if isAgemuxRunnerCommand(command, name) {
+			runnerPID = pid
+		}
+	}
+	if runnerPID == 0 {
+		return 0
+	}
+	for _, row := range rows {
+		if row.parent == runnerPID && isCodexCommand(row.command) {
+			return row.pid
+		}
+	}
+	return 0
+}
+
+func isAgemuxRunnerCommand(command, name string) bool {
+	fields := strings.Fields(command)
+	for idx := 0; idx+2 < len(fields); idx++ {
+		if filepath.Base(fields[idx]) == "agemux" && fields[idx+1] == "run" && fields[idx+2] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexCommand(command string) bool {
+	fields := strings.Fields(command)
+	for _, field := range fields {
+		if isCodexExecutable(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexExecutable(command string) bool {
+	base := filepath.Base(command)
+	return base == "codex" || base == filepath.Base(codexBin)
+}
+
+func updateTrackedCodexThreadID(name string, pid int, threadID string) error {
+	return withMetaLock(func(meta metadata) error {
+		row := meta[name]
+		if row == nil || int(int64Value(row["agent_pid"])) != pid {
+			return nil
+		}
+		row["resume_id"] = threadID
+		return saveMetaUnlocked(meta)
+	})
+}
+
+func trackCodexThreadID(ctx context.Context, name string, pid int) {
+	ticker := time.NewTicker(codexThreadTrackInterval)
+	defer ticker.Stop()
+	lastThreadID := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if threadID := codexThreadIDForPID(pid); threadID != "" && threadID != lastThreadID {
+			_ = updateTrackedCodexThreadID(name, pid, threadID)
+			lastThreadID = threadID
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func killSession(name string) error {
 	session, err := requireAgemuxSession(name)
 	if err != nil {
@@ -3223,7 +3715,7 @@ func interactive() error {
 		if err != nil || action == "" {
 			return err
 		}
-		if action == "kill" || action == "detach" {
+		if action == "kill" || action == "detach" || action == "restart" {
 			if err := runAction(action, value); err != nil {
 				return err
 			}
@@ -3255,6 +3747,8 @@ func runAction(action, value string) error {
 		return execAttach(value, "", false)
 	case "detach":
 		return detachSession(value)
+	case "restart":
+		return restartCodexSession(value)
 	case "kill":
 		return killSession(value)
 	default:
@@ -3296,22 +3790,23 @@ func plainMenu() (string, string, error) {
 }
 
 func tuiMenu() (string, string, error) {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	screen, err := terminalstate.BeginScreen(os.Stdin, os.Stdout)
 	if err != nil {
 		return "", "", err
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer screen.Close()
 	stdinFD := int(os.Stdin.Fd())
+	stdinFlags, err := unix.FcntlInt(uintptr(stdinFD), unix.F_GETFL, 0)
+	if err != nil {
+		return "", "", err
+	}
 	if err := syscall.SetNonblock(stdinFD, true); err != nil {
 		return "", "", err
 	}
-	defer syscall.SetNonblock(stdinFD, false)
-	fmt.Print("\033[?25l\033[?1049h")
-	defer fmt.Print("\033[?1049l\033[?25h")
-
+	defer unix.FcntlInt(uintptr(stdinFD), unix.F_SETFL, stdinFlags)
 	selected := 0
 	lastActionCol := 0
-	reader := make([]byte, 16)
+	keys := termkey.NewReader(os.Stdin)
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
@@ -3342,7 +3837,7 @@ func tuiMenu() (string, string, error) {
 			drawMenu(items, selected)
 			dirty = false
 		}
-		key, err := termkey.Read(os.Stdin, reader)
+		key, err := keys.Read()
 		if err != nil && !errors.Is(err, syscall.EAGAIN) {
 			return "", "", err
 		}
@@ -3395,9 +3890,15 @@ func tuiMenu() (string, string, error) {
 			if item.Type == "session" {
 				return "detach", item.Name, nil
 			}
+		case key == "r":
+			item := items[selected]
+			if item.Type == "session" && confirm(fmt.Sprintf("Restart %s on its exact Codex thread? y/N", item.Label), keys) {
+				return "restart", item.Name, nil
+			}
+			dirty = true
 		case key == "k" || key == "x":
 			item := items[selected]
-			if item.Type == "session" && confirm(fmt.Sprintf("Kill %s (%s)? y/N", item.Label, item.Name)) {
+			if item.Type == "session" && confirm(fmt.Sprintf("Kill %s (%s)? y/N", item.Label, item.Name), keys) {
 				return "kill", item.Name, nil
 			}
 			dirty = true
@@ -3497,7 +3998,7 @@ func drawMenu(items []menuItem, selected int) {
 	}
 	fmt.Print("\033[H\033[2J")
 	tuiLine(bold(clip("agemux", width-1)) + clip(" - persistent Codex and Claude sessions via shpool", max(0, width-1-len("agemux"))))
-	tuiLine(dim(clip("Arrows move  Enter open  c Codex  C new Codex  l Claude  L new Claude  d detach  k kill  q/Esc quit", width-1)))
+	tuiLine(dim(clip("Arrows move  Enter open  c Codex  C new Codex  l Claude  L new Claude  d detach  r restart  k kill  q/Esc quit", width-1)))
 	tuiLine(strings.Repeat("-", min(width-1, 1000)))
 	drawActionGrid(items, selected, width)
 	tuiLine("")
@@ -3585,7 +4086,7 @@ func tuiLine(s string) {
 	fmt.Print(s + "\r\n")
 }
 
-func confirm(prompt string) bool {
+func confirm(prompt string, keys *termkey.Reader) bool {
 	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
 	if width <= 0 {
 		width = 80
@@ -3594,9 +4095,8 @@ func confirm(prompt string) bool {
 		height = 24
 	}
 	fmt.Printf("\033[%d;1H%s", height, reverse(clip(prompt, width-1)))
-	buf := []byte{0}
 	for {
-		n, err := os.Stdin.Read(buf)
+		key, err := keys.Read()
 		if err != nil {
 			if errors.Is(err, syscall.EAGAIN) {
 				time.Sleep(30 * time.Millisecond)
@@ -3604,14 +4104,14 @@ func confirm(prompt string) bool {
 			}
 			return false
 		}
-		if n == 0 {
+		if key == "" {
 			time.Sleep(30 * time.Millisecond)
 			continue
 		}
-		switch buf[0] {
-		case 'y', 'Y':
+		switch key {
+		case "y", "Y":
 			return true
-		case 'n', 'N', '\r', '\n', 27:
+		case "n", "N", "\r", "\n", "\x1b":
 			return false
 		}
 	}
@@ -3912,10 +4412,10 @@ func runAgentSession(name, kind, root string) error {
 	}
 	defer syscall.SetNonblock(ptmxFD, false)
 
-	var oldState *term.State
+	var rawTerminal *terminalstate.Session
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
-		defer term.Restore(int(os.Stdin.Fd()), oldState)
+		rawTerminal, _ = terminalstate.BeginRaw(os.Stdin, os.Stdout)
+		defer rawTerminal.Close()
 	}
 
 	winch := make(chan os.Signal, 1)
@@ -3932,6 +4432,14 @@ func runAgentSession(name, kind, root string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	_ = updateMeta(name, map[string]any{
+		"runner_pid": os.Getpid(),
+		"agent_pid":  cmd.Process.Pid,
+	})
+	provider, _ := splitKind(kind)
+	if provider == "codex" {
+		go trackCodexThreadID(ctx, name, cmd.Process.Pid)
+	}
 	input := newPTYWriter(ctx, ptmxFD, cancel)
 	output := &outputBuffer{limit: controlOutputLimit}
 	stopControl, err := startControlServer(ctx, name, input, output)

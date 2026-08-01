@@ -21,13 +21,14 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Humelo/agemux/internal/terminalstate"
 	"github.com/Humelo/agemux/internal/termkey"
 	"github.com/gofrs/flock"
 	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 )
 
-const version = "0.1.12"
+const version = "0.1.13"
 
 var (
 	home         = homeDir()
@@ -1353,8 +1354,7 @@ func interactive() error {
 		refreshAll(accounts, true, true, nil)
 		return printTable(accounts)
 	}
-	runLoadingRefresh(accounts)
-	action, err := picker(accounts, "manage")
+	action, err := pickerWithScreen(accounts, "manage", true)
 	if err != nil {
 		return err
 	}
@@ -1378,14 +1378,6 @@ func interactive() error {
 }
 
 func runLoadingRefresh(accounts []account) {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		refreshAll(accounts, true, true, nil)
-		return
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-	fmt.Print("\033[?25l\033[?1049h")
-	defer fmt.Print("\033[?1049l\033[?25h")
 	done := make(chan struct{})
 	var mu sync.Mutex
 	active := map[int]string{}
@@ -1439,15 +1431,23 @@ func runLoadingRefresh(accounts []account) {
 	}
 }
 
-func picker(accounts []account, mode string) (pickerAction, error) {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+func pickerWithScreen(accounts []account, mode string, loading bool) (pickerAction, error) {
+	screen, err := terminalstate.BeginScreen(os.Stdin, os.Stdout)
 	if err != nil {
 		return pickerAction{}, err
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-	fmt.Print("\033[?25l\033[?1049h")
-	defer fmt.Print("\033[?1049l\033[?25h")
+	defer screen.Close()
+	keys := termkey.NewReader(os.Stdin)
+	if loading {
+		runLoadingRefresh(accounts)
+		if err := keys.Drain(); err != nil {
+			return pickerAction{}, err
+		}
+	}
+	return picker(accounts, mode, keys)
+}
 
+func picker(accounts []account, mode string, keys *termkey.Reader) (pickerAction, error) {
 	selected := 0
 	current := currentAccountID(accounts)
 	for i, acc := range accounts {
@@ -1456,11 +1456,10 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 			break
 		}
 	}
-	buf := make([]byte, 16)
 	for {
 		rows := buildPickerRows(accounts)
 		drawPicker(rows, selected, mode, len(accounts))
-		key, err := termkey.Read(os.Stdin, buf)
+		key, err := keys.Read()
 		if err != nil {
 			return pickerAction{}, err
 		}
@@ -1492,7 +1491,7 @@ func picker(accounts []account, mode string) (pickerAction, error) {
 				continue
 			}
 			accountIndex := selected - 1
-			if confirm(fmt.Sprintf("Delete %s from Claude accounts? y/N", displayAccountHint(accounts[accountIndex], nil))) {
+			if confirm(fmt.Sprintf("Delete %s from Claude accounts? y/N", displayAccountHint(accounts[accountIndex], nil)), keys) {
 				if err := removeAccount(accounts[accountIndex]); err != nil {
 					return pickerAction{}, err
 				}
@@ -1567,7 +1566,7 @@ func tuiLine(s string) {
 	fmt.Print(s + "\r\n")
 }
 
-func confirm(prompt string) bool {
+func confirm(prompt string, keys *termkey.Reader) bool {
 	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
 	if width <= 0 {
 		width = 80
@@ -1576,9 +1575,18 @@ func confirm(prompt string) bool {
 		height = 24
 	}
 	fmt.Printf("\033[%d;1H%s", height, reverse(clipDisplay(prompt, width-1)))
-	buf := []byte{0}
-	_, _ = os.Stdin.Read(buf)
-	return buf[0] == 'y' || buf[0] == 'Y'
+	for {
+		key, err := keys.Read()
+		if err != nil {
+			return false
+		}
+		switch key {
+		case "y", "Y":
+			return true
+		case "n", "N", "\r", "\n", "\x1b":
+			return false
+		}
+	}
 }
 
 func commandRun(rest []string) error {
@@ -1658,7 +1666,7 @@ func commandChange(rest []string) error {
 	var acc *account
 	if len(rest) == 0 {
 		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-			action, err := picker(accounts, "change")
+			action, err := pickerWithScreen(accounts, "change", false)
 			if err != nil || action.Account == nil {
 				return err
 			}
@@ -1906,7 +1914,7 @@ func resolveSelector(selector []string, accounts []account, auth map[string]any,
 		for _, idx := range matches {
 			candidates = append(candidates, accounts[idx])
 		}
-		action, err := picker(candidates, "resolve")
+		action, err := pickerWithScreen(candidates, "resolve", false)
 		if err != nil || action.Account == nil {
 			return nil, err
 		}

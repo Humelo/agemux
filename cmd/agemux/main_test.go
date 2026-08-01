@@ -17,6 +17,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Humelo/agemux/internal/terminalstate"
+	"github.com/Humelo/agemux/internal/termkey"
 )
 
 func TestResolveBinaryUsesPathWithoutPreferredPath(t *testing.T) {
@@ -50,13 +53,32 @@ func TestTitleParserPreservesRawTitleText(t *testing.T) {
 }
 
 func TestCodexKeyboardSetupDoesNotEnableFocusTracking(t *testing.T) {
-	if strings.Contains(codexKeyboardSetup, "\x1b[?1004h") {
+	if strings.Contains(terminalstate.CodexKeyboardSetup, "\x1b[?1004h") {
 		t.Fatal("attach-time setup must not enable focus tracking before Codex is ready")
 	}
 	for _, sequence := range []string{"\x1b[?2004h", "\x1b[>7u"} {
-		if !strings.Contains(codexKeyboardSetup, sequence) {
+		if !strings.Contains(terminalstate.CodexKeyboardSetup, sequence) {
 			t.Fatalf("attach-time setup is missing %q", sequence)
 		}
+	}
+}
+
+func TestConfirmConsumesKeyBufferedByPickerReader(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	if _, err := writer.Write([]byte("ry")); err != nil {
+		t.Fatal(err)
+	}
+	keys := termkey.NewReader(reader)
+	if key, err := keys.Read(); err != nil || key != "r" {
+		t.Fatalf("action key = %q, err = %v", key, err)
+	}
+	if !confirm("Restart? y/N", keys) {
+		t.Fatal("buffered confirmation key was not consumed")
 	}
 }
 
@@ -352,6 +374,22 @@ func TestStartingReservationSurvivesListBeforeShpoolAppears(t *testing.T) {
 	}
 }
 
+func TestStartNamedCodexRejectsThreadReservedByAnotherName(t *testing.T) {
+	threadID := "019f0000" + "-0000-7000-8000-" + "000000000100"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	fake := fakeShpoolScript(t, "if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n")
+	withShpoolBin(t, fake)
+	if err := reserveNamedCodexStart("first-name", "codex-resume", dir, threadID, "", "", "", nil, "First", "token-one"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := startNamedCodex("second-name", dir, threadID, "", "", "", nil, "Second", true)
+	if err == nil || !strings.Contains(err.Error(), "first-name") || !strings.Contains(err.Error(), "already owned") {
+		t.Fatalf("unexpected duplicate reservation result: %v", err)
+	}
+}
+
 func TestOldStartCleanupDoesNotDeleteNewReservation(t *testing.T) {
 	dir := t.TempDir()
 	withMetadataDir(t, filepath.Join(dir, "data"))
@@ -408,7 +446,7 @@ func TestStartNamedCodexFailsWhenControlChannelNeverStarts(t *testing.T) {
 
 func TestShpoolSessionsTimesOut(t *testing.T) {
 	fake := fakeShpoolScript(t,
-		"if [[ \"$1 $2\" == \"list --json\" ]]; then sleep 2; exit 0; fi\n"+
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then exec sleep 2; fi\n"+
 			"exit 2\n",
 	)
 	withShpoolBin(t, fake)
@@ -417,6 +455,23 @@ func TestShpoolSessionsTimesOut(t *testing.T) {
 	_, err := shpoolSessions()
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestLiveSessionStatesSupportsShortProbeTimeout(t *testing.T) {
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then exec sleep 2; fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	started := time.Now()
+	_, err := liveSessionStatesWithTimeout(25 * time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("short state probe took %s", elapsed)
 	}
 }
 
@@ -533,6 +588,87 @@ func TestExecAttachReconnectsAfterTransportFailure(t *testing.T) {
 	}
 }
 
+func TestExecAttachStopsAfterThreeReconnectsAndResetsKeyboardEachTime(t *testing.T) {
+	withoutAttachRetryDelay(t)
+	dir := t.TempDir()
+	attemptsFile := filepath.Join(dir, "attempts")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then\n"+
+			"  printf x >> "+shellQuote(attemptsFile)+"\n"+
+			"  exit 1\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	output, attachErr := captureStdout(t, func() error {
+		return execAttach("agemux-test", "", false)
+	})
+	if attachErr == nil {
+		t.Fatal("expected attach failure")
+	}
+	attempts, err := os.ReadFile(attemptsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(attempts) != "xxxx" {
+		t.Fatalf("attach attempts = %q, want initial attempt plus three reconnects", attempts)
+	}
+	if got := strings.Count(output, terminalstate.CodexKeyboardSetup); got != 4 {
+		t.Fatalf("keyboard setup count = %d, want 4", got)
+	}
+	if got := strings.Count(output, terminalstate.KeyboardResetSequence+terminalstate.CodexKeyboardSetup); got != 4 {
+		t.Fatalf("reset-before-setup count = %d, want 4", got)
+	}
+}
+
+func TestExecAttachReconnectsAfterTransientListFailures(t *testing.T) {
+	withoutAttachRetryDelay(t)
+	dir := t.TempDir()
+	listCountFile := filepath.Join(dir, "list-count")
+	attachCountFile := filepath.Join(dir, "attach-count")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  count=0\n"+
+			"  if [[ -f "+shellQuote(listCountFile)+" ]]; then count=$(cat "+shellQuote(listCountFile)+"); fi\n"+
+			"  count=$((count + 1))\n"+
+			"  printf '%s' \"$count\" > "+shellQuote(listCountFile)+"\n"+
+			"  if [[ $count -eq 2 || $count -eq 3 ]]; then exit 1; fi\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-test\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then\n"+
+			"  count=0\n"+
+			"  if [[ -f "+shellQuote(attachCountFile)+" ]]; then count=$(cat "+shellQuote(attachCountFile)+"); fi\n"+
+			"  count=$((count + 1))\n"+
+			"  printf '%s' \"$count\" > "+shellQuote(attachCountFile)+"\n"+
+			"  if [[ $count -eq 1 ]]; then exit 1; fi\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+
+	if err := execAttach("agemux-test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	listCalls, err := os.ReadFile(listCountFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachCalls, err := os.ReadFile(attachCountFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(listCalls) != "4" || string(attachCalls) != "2" {
+		t.Fatalf("list calls = %q, attach calls = %q; want 4 and 2", listCalls, attachCalls)
+	}
+}
+
 func TestShouldReconnectAttachWaitsForDetachedState(t *testing.T) {
 	withoutAttachRetryDelay(t)
 	dir := t.TempDir()
@@ -594,6 +730,415 @@ func TestExecAttachDoesNotReconnectAfterSessionExit(t *testing.T) {
 	}
 	if string(attempts) != "x" {
 		t.Fatalf("attach attempts = %q, want one", attempts)
+	}
+}
+
+func TestCodexThreadIDFromRolloutPath(t *testing.T) {
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	path := "/tmp/custom-codex-home/sessions/2026/07/22/rollout-2026-07-22T12-11-51-" + threadID + ".jsonl"
+	if got := codexThreadIDFromRolloutPath(path); got != threadID {
+		t.Fatalf("thread ID = %q, want %q", got, threadID)
+	}
+	if got := codexThreadIDFromRolloutPath("/tmp/rollout-" + threadID + ".jsonl"); got != "" {
+		t.Fatalf("accepted rollout outside Codex sessions directory: %q", got)
+	}
+}
+
+func TestCodexThreadIDForPIDReadsOpenRolloutFile(t *testing.T) {
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	dir := filepath.Join(t.TempDir(), "custom-codex-home", "sessions", "2026", "07", "25")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	rollout := filepath.Join(dir, "rollout-2026-07-25T12-00-00-"+threadID+".jsonl")
+	file, err := os.OpenFile(rollout, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	writeRolloutSessionMeta(t, file, threadID, "")
+
+	if got := codexThreadIDForPID(os.Getpid()); got != threadID {
+		t.Fatalf("thread ID from /proc/self/fd = %q, want %q", got, threadID)
+	}
+}
+
+func TestCodexThreadIDForPIDIgnoresSubagentRollouts(t *testing.T) {
+	rootID := "019f0000" + "-0000-7000-8000-" + "000000000100"
+	subagentID := "019f0000" + "-0000-7000-8000-" + "000000000200"
+	dir := filepath.Join(t.TempDir(), "codex", "sessions", "2026", "08", "01")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenFile(filepath.Join(dir, "rollout-root-"+rootID+".jsonl"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	writeRolloutSessionMeta(t, root, rootID, "")
+	subagent, err := os.OpenFile(filepath.Join(dir, "rollout-subagent-"+subagentID+".jsonl"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subagent.Close()
+	writeRolloutSessionMeta(t, subagent, subagentID, rootID)
+
+	if got := codexThreadIDForPID(os.Getpid()); got != rootID {
+		t.Fatalf("thread ID with subagent rollout = %q, want root %q", got, rootID)
+	}
+}
+
+func TestTrackedCodexThreadIDCannotOverwriteAnotherAgent(t *testing.T) {
+	originalID := "019f0000" + "-0000-7000-8000-" + "000000000100"
+	replacementID := "019f0000" + "-0000-7000-8000-" + "000000000200"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	if err := updateMeta("tracked-session", map[string]any{
+		"agent_pid": 100,
+		"resume_id": originalID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateTrackedCodexThreadID("tracked-session", 200, replacementID); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(sessionMeta("tracked-session")["resume_id"]); got != originalID {
+		t.Fatalf("stale tracker changed resume ID to %q", got)
+	}
+
+	if err := withMetaLock(func(meta metadata) error {
+		delete(meta, "tracked-session")
+		return saveMetaUnlocked(meta)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateTrackedCodexThreadID("tracked-session", 100, originalID); err != nil {
+		t.Fatal(err)
+	}
+	if row := sessionMeta("tracked-session"); len(row) != 0 {
+		t.Fatalf("stale tracker recreated deleted metadata: %#v", row)
+	}
+}
+
+func TestTrackedCodexThreadIDUpdatesWhenSameAgentChangesThread(t *testing.T) {
+	originalID := "019f0000" + "-0000-7000-8000-" + "000000000100"
+	replacementID := "019f0000" + "-0000-7000-8000-" + "000000000200"
+	withMetadataDir(t, filepath.Join(t.TempDir(), "data"))
+	if err := updateMeta("tracked-session", map[string]any{
+		"agent_pid": 100,
+		"resume_id": originalID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateTrackedCodexThreadID("tracked-session", 100, replacementID); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(sessionMeta("tracked-session")["resume_id"]); got != replacementID {
+		t.Fatalf("thread change was not tracked: got %q, want %q", got, replacementID)
+	}
+}
+
+func TestRestartCodexSessionPreservesThreadAndLaunchSettings(t *testing.T) {
+	const name = "restart-preserves-settings"
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name {
+			return threadID
+		}
+		return ""
+	})
+	withoutControlReadyWait(t)
+	killed := filepath.Join(dir, "killed")
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  if [[ -f "+shellQuote(killed)+" ]]; then printf '{\"sessions\":[]}'; else printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; fi\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf '%s\\n' \"$*\" >> "+shellQuote(calls)+"\n"+
+			"if [[ \"$1\" == \"kill\" ]]; then touch "+shellQuote(killed)+"; fi\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	root := filepath.Join(dir, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateMeta(name, map[string]any{
+		"provider":         "codex",
+		"kind":             "codex-resume",
+		"root":             root,
+		"title":            "Exact thread",
+		"resume_id":        threadID,
+		"model":            "gpt-5.6-sol",
+		"reasoning_effort": "xhigh",
+		"service_tier":     "priority",
+		"codex_config":     []string{"agents.max_threads=16", "notice.hide_rate_limit_model_nudge=true"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureStdout(t, func() error { return restartCodexSession(name) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "restarted "+name+" as Codex thread "+threadID+"\n" {
+		t.Fatalf("restart output = %q", output)
+	}
+	called, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(called), "kill -- "+name) || !strings.Contains(string(called), "attach --background") {
+		t.Fatalf("restart did not kill and relaunch the session: %q", called)
+	}
+	row := sessionMeta(name)
+	if row["resume_id"] != threadID || row["model"] != "gpt-5.6-sol" || row["reasoning_effort"] != "xhigh" || row["service_tier"] != "priority" || row["title"] != "Exact thread" {
+		t.Fatalf("restart changed launch metadata: %#v", row)
+	}
+	if got := stringSliceValue(row["codex_config"]); strings.Join(got, "|") != "agents.max_threads=16|notice.hide_rate_limit_model_nudge=true" {
+		t.Fatalf("restart changed Codex config: %#v", got)
+	}
+}
+
+func TestRestartCodexSessionUsesLiveThreadInsteadOfStaleMetadata(t *testing.T) {
+	const name = "restart-stale-thread"
+	storedID := "019f0000" + "-0000-7000-8000-" + "000000000100"
+	liveID := "019f0000" + "-0000-7000-8000-" + "000000000200"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name {
+			return liveID
+		}
+		return ""
+	})
+	withoutControlReadyWait(t)
+	killed := filepath.Join(dir, "killed")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  if [[ -f "+shellQuote(killed)+" ]]; then printf '{\"sessions\":[]}'; else printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; fi\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"kill\" ]]; then touch "+shellQuote(killed)+"; fi\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta(name, map[string]any{
+		"provider":  "codex",
+		"kind":      "codex-resume",
+		"root":      dir,
+		"resume_id": storedID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureStdout(t, func() error { return restartCodexSession(name) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "restarted "+name+" as Codex thread "+liveID+"\n" {
+		t.Fatalf("restart output = %q", output)
+	}
+	if got := stringValue(sessionMeta(name)["resume_id"]); got != liveID {
+		t.Fatalf("restart kept stale thread %q, want live thread %q", got, liveID)
+	}
+}
+
+func TestRestartCodexSessionRejectsThreadOwnedByAnotherLiveSession(t *testing.T) {
+	const (
+		name  = "restart-duplicate"
+		owner = "scheduled-owner"
+	)
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name || sessionName == owner {
+			return threadID
+		}
+		return ""
+	})
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"},{\"name\":\""+owner+"\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf x > "+shellQuote(calls)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	for _, sessionName := range []string{name, owner} {
+		if err := updateMeta(sessionName, map[string]any{
+			"provider":  "codex",
+			"kind":      "codex-resume",
+			"root":      dir,
+			"resume_id": threadID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := restartCodexSession(name)
+	if err == nil || !strings.Contains(err.Error(), owner) || !strings.Contains(err.Error(), "restart refused") {
+		t.Fatalf("unexpected restart result: %v", err)
+	}
+	if _, statErr := os.Stat(calls); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("duplicate thread reached shpool mutation: %v", statErr)
+	}
+}
+
+func TestRestartCodexSessionRejectsOwnerMissingStoredThreadID(t *testing.T) {
+	const (
+		name  = "restart-duplicate-with-legacy-owner"
+		owner = "agemux-legacy-owner"
+	)
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name || sessionName == owner {
+			return threadID
+		}
+		return ""
+	})
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"},{\"name\":\""+owner+"\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf x > "+shellQuote(calls)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta(name, map[string]any{"provider": "codex", "kind": "codex-resume", "root": dir, "resume_id": threadID}); err != nil {
+		t.Fatal(err)
+	}
+	err := restartCodexSession(name)
+	if err == nil || !strings.Contains(err.Error(), owner) || !strings.Contains(err.Error(), "restart refused") {
+		t.Fatalf("unexpected restart result: %v", err)
+	}
+	if _, statErr := os.Stat(calls); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("legacy duplicate reached shpool mutation: %v", statErr)
+	}
+}
+
+func TestRestartCodexSessionRejectsUnverifiedThreadWithoutKilling(t *testing.T) {
+	const name = "restart-without-thread-id"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; exit 0; fi\n"+
+			"printf x > "+shellQuote(calls)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta(name, map[string]any{"provider": "codex", "kind": "codex-resume", "root": dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := restartCodexSession(name)
+	if err == nil || !strings.Contains(err.Error(), "could not determine the active Codex thread UUID") {
+		t.Fatalf("unexpected restart result: %v", err)
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unverified session reached shpool kill: %v", err)
+	}
+}
+
+func TestRestartCodexSessionRejectsClaudeWithoutKilling(t *testing.T) {
+	const name = "restart-claude"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; exit 0; fi\n"+
+			"printf x > "+shellQuote(calls)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta(name, map[string]any{"provider": "claude", "kind": "claude-resume", "root": dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := restartCodexSession(name)
+	if err == nil || !strings.Contains(err.Error(), "is not a Codex session") {
+		t.Fatalf("unexpected restart result: %v", err)
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Claude session reached shpool kill: %v", err)
+	}
+}
+
+func TestRestartCodexSessionValidatesRootBeforeKilling(t *testing.T) {
+	const name = "restart-invalid-root"
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name {
+			return threadID
+		}
+		return ""
+	})
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; exit 0; fi\n"+
+			"printf x > "+shellQuote(calls)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta(name, map[string]any{
+		"provider":  "codex",
+		"kind":      "codex-resume",
+		"resume_id": threadID,
+		"root":      filepath.Join(dir, "missing"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := restartCodexSession(name)
+	if err == nil || !strings.Contains(err.Error(), "invalid root") {
+		t.Fatalf("unexpected restart result: %v", err)
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid-root session reached shpool kill: %v", err)
+	}
+}
+
+func TestRestartCodexSessionRejectsMissingRecordedRoot(t *testing.T) {
+	const name = "restart-missing-root"
+	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name {
+			return threadID
+		}
+		return ""
+	})
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; exit 0; fi\n"+
+			"printf x > "+shellQuote(calls)+"\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta(name, map[string]any{"provider": "codex", "kind": "codex-resume", "resume_id": threadID}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := restartCodexSession(name)
+	if err == nil || !strings.Contains(err.Error(), "missing its recorded root") {
+		t.Fatalf("unexpected restart result: %v", err)
+	}
+	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-root session reached shpool kill: %v", err)
 	}
 }
 
@@ -803,6 +1348,63 @@ func withoutControlReadyWait(t *testing.T) {
 	t.Cleanup(func() {
 		waitControlReady = old
 	})
+}
+
+func withCodexThreadDiscovery(t *testing.T, discover func(string) string) {
+	t.Helper()
+	previous := discoverThreadID
+	discoverThreadID = discover
+	t.Cleanup(func() { discoverThreadID = previous })
+}
+
+func writeRolloutSessionMeta(t *testing.T, file *os.File, threadID, parentThreadID string) {
+	t.Helper()
+	source := any("cli")
+	parent := any(nil)
+	if parentThreadID != "" {
+		source = map[string]any{
+			"subagent": map[string]any{
+				"thread_spawn": map[string]any{
+					"parent_thread_id": parentThreadID,
+					"depth":            1,
+				},
+			},
+		}
+		parent = parentThreadID
+	}
+	event := map[string]any{
+		"type": "session_meta",
+		"payload": map[string]any{
+			"id":               threadID,
+			"source":           source,
+			"parent_thread_id": parent,
+		},
+	}
+	if err := json.NewEncoder(file).Encode(event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stdout")
+	output, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = output
+	defer func() { os.Stdout = old }()
+	runErr := fn()
+	os.Stdout = old
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content), runErr
 }
 
 func withMetadataDir(t *testing.T, dir string) {

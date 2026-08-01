@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Humelo/agemux/internal/termkey"
 )
 
 func TestParseUsageText(t *testing.T) {
@@ -21,6 +23,25 @@ Current week (Fable): 1% used`)
 	}
 	if got := usage["fable_week"]["used_percentage"]; got != 1.0 {
 		t.Fatalf("fable_week used = %#v", got)
+	}
+}
+
+func TestConfirmConsumesKeyBufferedByPickerReader(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	if _, err := writer.Write([]byte("dy")); err != nil {
+		t.Fatal(err)
+	}
+	keys := termkey.NewReader(reader)
+	if key, err := keys.Read(); err != nil || key != "d" {
+		t.Fatalf("action key = %q, err = %v", key, err)
+	}
+	if !confirm("Delete? y/N", keys) {
+		t.Fatal("buffered confirmation key was not consumed")
 	}
 }
 
