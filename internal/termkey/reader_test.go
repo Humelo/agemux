@@ -126,6 +126,9 @@ func TestReaderNormalizesEnhancedCursorKeys(t *testing.T) {
 }
 
 func TestReaderDrainDiscardsBufferedInput(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("anonymous pipes do not have Windows console wait semantics")
+	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
