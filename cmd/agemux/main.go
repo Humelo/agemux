@@ -2463,7 +2463,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.13")
+	req.Header.Set("User-Agent", "agemux/0.1.14")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -3546,7 +3546,20 @@ func updateTrackedCodexThreadID(name string, pid int, threadID string) error {
 	})
 }
 
-func trackCodexThreadID(ctx context.Context, name string, pid int) {
+func claimTrackedCodexThreadID(name string, pid int, threadID string) ([]string, error) {
+	var owners []string
+	err := withCodexThreadLock(threadID, func() error {
+		var err error
+		owners, err = otherCodexThreadOwners(name, threadID)
+		if err != nil || len(owners) > 0 {
+			return err
+		}
+		return updateTrackedCodexThreadID(name, pid, threadID)
+	})
+	return owners, err
+}
+
+func trackCodexThreadID(ctx context.Context, name string, pid int, onConflict func(string, []string)) {
 	ticker := time.NewTicker(codexThreadTrackInterval)
 	defer ticker.Stop()
 	lastThreadID := ""
@@ -3557,8 +3570,16 @@ func trackCodexThreadID(ctx context.Context, name string, pid int) {
 		default:
 		}
 		if threadID := codexThreadIDForPID(pid); threadID != "" && threadID != lastThreadID {
-			_ = updateTrackedCodexThreadID(name, pid, threadID)
-			lastThreadID = threadID
+			owners, err := claimTrackedCodexThreadID(name, pid, threadID)
+			if err == nil && len(owners) > 0 {
+				if onConflict != nil {
+					onConflict(threadID, owners)
+				}
+				return
+			}
+			if err == nil {
+				lastThreadID = threadID
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -3892,7 +3913,7 @@ func tuiMenu() (string, string, error) {
 			}
 		case key == "r":
 			item := items[selected]
-			if item.Type == "session" && confirm(fmt.Sprintf("Restart %s on its exact Codex thread? y/N", item.Label), keys) {
+			if item.Type == "session" && confirm(restartConfirmationPrompt(item), keys) {
 				return "restart", item.Name, nil
 			}
 			dirty = true
@@ -3906,6 +3927,16 @@ func tuiMenu() (string, string, error) {
 			return "", "", nil
 		}
 	}
+}
+
+func restartConfirmationPrompt(item menuItem) string {
+	prompt := fmt.Sprintf("Restart %s (%s)", item.Label, item.Name)
+	if threadID := discoverThreadID(item.Name); validThreadID(threadID) {
+		prompt += " on Codex thread " + threadID
+	} else {
+		prompt += " on its exact Codex thread"
+	}
+	return prompt + "? y/N"
 }
 
 const (
@@ -4438,7 +4469,19 @@ func runAgentSession(name, kind, root string) error {
 	})
 	provider, _ := splitKind(kind)
 	if provider == "codex" {
-		go trackCodexThreadID(ctx, name, cmd.Process.Pid)
+		go trackCodexThreadID(ctx, name, cmd.Process.Pid, func(threadID string, owners []string) {
+			fmt.Fprintf(
+				os.Stderr,
+				"\r\nagemux: Codex thread %s is already owned by live agemux session(s): %s; closing duplicate session %s\r\n",
+				threadID,
+				strings.Join(owners, ", "),
+				name,
+			)
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+			}
+			cancel()
+		})
 	}
 	input := newPTYWriter(ctx, ptmxFD, cancel)
 	output := &outputBuffer{limit: controlOutputLimit}

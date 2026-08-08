@@ -1,21 +1,18 @@
-# Agent Multiplexer v0.1.13
+# Agent Multiplexer v0.1.14
 
-Reliable terminal recovery and exact Codex session restarts.
+Prevent Codex thread identity collisions in persistent sessions.
 
-- Preserve batched, fragmented, and enhanced terminal cursor-key sequences across the session and account pickers.
-- Reset nested keyboard protocols and restore terminal state after normal exits, transport interruptions, and signals.
-- Retry transient shpool attachment disconnects with bounded backoff.
-- Restart a Codex session directly on its verified root thread UUID while ignoring open subagent rollouts and preserving launch settings.
-- Serialize resume starts and restarts by UUID, refusing the operation when another live or starting agemux session already owns the thread.
+- Close a Codex resume-picker session when its selected thread is already owned by another live agemux session.
+- Show the internal agemux session name and verified Codex thread UUID before an interactive restart.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash -s -- --with-codex-lb
 ```

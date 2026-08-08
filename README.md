@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.13/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -98,7 +98,7 @@ Sessions that are already attached in another terminal are not force-detached by
 
 If `shpool attach` exits while the session is still live and disconnected, agemux automatically reconnects up to three times with bounded backoff. The retry budget resets after a stable minute so isolated interruptions do not accumulate over a long-running terminal. agemux also resets bracketed paste, focus tracking, modify-other-keys, and the full Kitty keyboard-protocol stack at TUI and attachment boundaries so a crashed nested CLI does not leak escape sequences into the shell.
 
-`agemux restart NAME` and the interactive `r` key stop the selected Codex process and immediately resume the same root thread by UUID. This bypasses the slower Codex resume picker and preserves the session root, title, model, reasoning effort, service tier, and extra Codex config stored by agemux. Restart ignores open subagent rollout files and is limited to sessions whose exact root thread UUID can be verified before the old process is stopped. Resume starts and restarts are serialized by UUID and refuse a thread already owned by another live or starting agemux session, preventing stale titles and concurrent schedulers from launching duplicate agents.
+`agemux restart NAME` and the interactive `r` key stop the selected Codex process and immediately resume the same root thread by UUID. The confirmation shows the internal agemux session name and verified thread UUID so a changing display title cannot hide the target identity. This bypasses the slower Codex resume picker and preserves the session root, title, model, reasoning effort, service tier, and extra Codex config stored by agemux. Restart ignores open subagent rollout files and is limited to sessions whose exact root thread UUID can be verified before the old process is stopped. Resume starts and restarts are serialized by UUID and refuse a thread already owned by another live or starting agemux session. Sessions selected through the interactive Codex resume picker are checked again as soon as their thread UUID becomes observable; a duplicate picker session is closed instead of claiming the same thread.
 
 When an explicit kill finds a stale disconnected shpool entry whose child process has already exited, agemux repairs the stale entry and retries the kill once. Attached sessions do not enter this recovery path.
 

@@ -838,6 +838,64 @@ func TestTrackedCodexThreadIDUpdatesWhenSameAgentChangesThread(t *testing.T) {
 	}
 }
 
+func TestClaimTrackedCodexThreadIDRejectsLiveOwner(t *testing.T) {
+	const (
+		name     = "picker-session"
+		owner    = "scheduled-session"
+		threadID = "019f0000" + "-0000-7000-8000-000000000200"
+	)
+	withMetadataDir(t, filepath.Join(t.TempDir(), "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == owner {
+			return threadID
+		}
+		return ""
+	})
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"},{\"name\":\""+owner+"\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	for _, sessionName := range []string{name, owner} {
+		if err := updateMeta(sessionName, map[string]any{
+			"agent_pid": 100,
+			"kind":      "codex-resume",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	owners, err := claimTrackedCodexThreadID(name, 100, threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(owners, ",") != owner {
+		t.Fatalf("owners = %v, want %s", owners, owner)
+	}
+	if got := stringValue(sessionMeta(name)["resume_id"]); got != "" {
+		t.Fatalf("duplicate picker claimed thread %q", got)
+	}
+}
+
+func TestRestartConfirmationPromptShowsSessionAndThread(t *testing.T) {
+	const threadID = "019f0000" + "-0000-7000-8000-000000000300"
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == "internal-name" {
+			return threadID
+		}
+		return ""
+	})
+	prompt := restartConfirmationPrompt(menuItem{Type: "session", Name: "internal-name", Label: "Visible title"})
+	for _, value := range []string{"Visible title", "internal-name", threadID} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("confirmation %q is missing %q", prompt, value)
+		}
+	}
+}
+
 func TestRestartCodexSessionPreservesThreadAndLaunchSettings(t *testing.T) {
 	const name = "restart-preserves-settings"
 	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"
