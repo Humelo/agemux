@@ -1,18 +1,17 @@
-# Agent Multiplexer v0.1.17
+# Agent Multiplexer v0.1.18
 
-Make the Grok resume picker actually pick a session.
+Hide Grok subagent sessions from the resume picker.
 
-- `agemux grok` now lists this directory's Grok sessions from `~/.grok/sessions` and launches `grok --resume UUID`.
-- Grok's welcome screen is no longer used as the picker; it does not reliably open inside shpool.
+- The picker now matches `/resume`: only top-level chats, not explore/general-purpose children.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.17/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.18/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.17/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.18/scripts/install.sh | bash -s -- --with-codex-lb
 ```

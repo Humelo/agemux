@@ -351,6 +351,46 @@ func TestListGrokDiskSessionsReadsSummary(t *testing.T) {
 	}
 }
 
+func TestListGrokDiskSessionsSkipsSubagents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GROK_HOME", home)
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	childID := "01a0003f" + "-ddcc-7af0-9511-" + "ea9131ca3723"
+	group := filepath.Join(home, "sessions", urlQueryEscape(abs))
+	parentDir := filepath.Join(group, parentID)
+	childDir := filepath.Join(group, childID)
+	if err := os.MkdirAll(filepath.Join(parentDir, "subagents", childID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(childDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "summary.json"), []byte(`{"generated_title":"Parent chat","updated_at":"2026-08-14T12:00:00Z"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(childDir, "summary.json"), []byte(`{"generated_title":"Explore child","session_kind":"subagent","updated_at":"2026-08-14T13:00:00Z"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "subagents", childID, "meta.json"), []byte(`{"child_session_id":"`+childID+`","subagent_id":"`+childID+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := listGrokDiskSessions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != parentID || sessions[0].Title != "Parent chat" {
+		t.Fatalf("expected only parent session, got %#v", sessions)
+	}
+}
+
 func urlQueryEscape(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, "/", "%2F"), " ", "%20")
 }

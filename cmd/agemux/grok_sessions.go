@@ -175,6 +175,7 @@ func listGrokDiskSessions(root string) ([]grokDiskSession, error) {
 		return nil, err
 	}
 	var sessions []grokDiskSession
+	children := grokSubagentChildIDs(dirs)
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -182,6 +183,9 @@ func listGrokDiskSessions(root string) ([]grokDiskSession, error) {
 		}
 		for _, entry := range entries {
 			if !entry.IsDir() || !validThreadID(entry.Name()) {
+				continue
+			}
+			if children[strings.ToLower(entry.Name())] {
 				continue
 			}
 			session, ok := readGrokDiskSession(filepath.Join(dir, entry.Name()), entry.Name())
@@ -194,6 +198,44 @@ func listGrokDiskSessions(root string) ([]grokDiskSession, error) {
 		return sessions[i].Updated.After(sessions[j].Updated)
 	})
 	return sessions, nil
+}
+
+func grokSubagentChildIDs(groupDirs []string) map[string]bool {
+	children := map[string]bool{}
+	for _, dir := range groupDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			metaFiles, err := filepath.Glob(filepath.Join(dir, entry.Name(), "subagents", "*", "meta.json"))
+			if err != nil {
+				continue
+			}
+			for _, metaFile := range metaFiles {
+				content, err := os.ReadFile(metaFile)
+				if err != nil {
+					continue
+				}
+				var meta struct {
+					ChildSessionID string `json:"child_session_id"`
+					SubagentID     string `json:"subagent_id"`
+				}
+				if json.Unmarshal(content, &meta) != nil {
+					continue
+				}
+				for _, id := range []string{meta.ChildSessionID, meta.SubagentID} {
+					if validThreadID(id) {
+						children[strings.ToLower(id)] = true
+					}
+				}
+			}
+		}
+	}
+	return children
 }
 
 func grokSessionGroupDirs(root string) ([]string, error) {
@@ -242,6 +284,7 @@ func readGrokDiskSession(dir, id string) (grokDiskSession, bool) {
 		GeneratedTitle  string `json:"generated_title"`
 		SessionSummary  string `json:"session_summary"`
 		LastTurnSummary string `json:"last_turn_summary"`
+		SessionKind     string `json:"session_kind"`
 		UpdatedAt       string `json:"updated_at"`
 		LastActiveAt    string `json:"last_active_at"`
 		CreatedAt       string `json:"created_at"`
@@ -250,6 +293,9 @@ func readGrokDiskSession(dir, id string) (grokDiskSession, bool) {
 		} `json:"info"`
 	}
 	if json.Unmarshal(content, &summary) != nil {
+		return grokDiskSession{}, false
+	}
+	if strings.EqualFold(summary.SessionKind, "subagent") {
 		return grokDiskSession{}, false
 	}
 	if summary.Info.ID != "" && validThreadID(summary.Info.ID) {
