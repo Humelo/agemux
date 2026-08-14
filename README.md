@@ -1,10 +1,10 @@
 # Agent Multiplexer
 
-Agent Multiplexer is a local CLI for people who run multiple Claude Code and Codex sessions on a shared workstation or remote server.
+Agent Multiplexer is a local CLI for people who run multiple Claude Code, Codex, and Grok Build sessions on a shared workstation or remote server.
 
 It ships one main command:
 
-- `agemux`: persistent Codex and Claude session picker backed by `shpool`, with account views built in
+- `agemux`: persistent Codex, Claude, and Grok session picker backed by `shpool`, with account views built in
 
 The implementation is written in Go and ships as standalone binaries.
 
@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.14/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -44,7 +44,10 @@ agemux codex
 agemux codex-new
 agemux claude
 agemux claude-new
+agemux grok
+agemux grok-new
 agemux start codex nightly-review --resume SESSION_UUID --background --root /workspace/project
+agemux start grok nightly-grok --resume SESSION_UUID --background --root /workspace/project
 printf '%s' 'Review the pending queue.' | agemux send nightly-review
 agemux capture nightly-review --lines 120
 agemux codex-accounts
@@ -67,15 +70,17 @@ agemux kill NAME
 - `C`: new Codex session
 - `l`: new Claude resume picker
 - `L`: new Claude session
+- `g`: new Grok welcome/resume picker
+- `G`: new Grok session (`grok --session-id` so it does not open the welcome picker)
 - `Enter` on `Codex accounts`: switch the active Codex CLI auth file or choose `+ Add Codex account`
 - `Enter` on `Claude accounts`: open the Claude account picker
 - `d`: detach the selected terminal while keeping its agent session running
-- `r`: restart the selected Codex session on its exact thread UUID
+- `r`: restart the selected Codex or Grok session on its exact session UUID
 - `k`: kill selected persistent session after confirmation
 
 Close the terminal tab to detach. The underlying session keeps running in `shpool`.
 
-Named Codex sessions can be started without attaching a terminal. `agemux send` delivers one submitted prompt to the session's PTY, and `agemux capture` reads recent terminal output for health checks. Sending works while the shpool session is attached or detached and does not take over another terminal attachment.
+Named Codex and Grok sessions can be started without attaching a terminal. `agemux send` delivers one submitted prompt to the session's PTY, and `agemux capture` reads recent terminal output for health checks. Sending works while the shpool session is attached or detached and does not take over another terminal attachment.
 
 ```sh
 agemux start codex nightly-review \
@@ -86,6 +91,13 @@ agemux start codex nightly-review \
   --effort high \
   --service-tier default \
   --config notice.hide_rate_limit_model_nudge=true
+
+agemux start grok nightly-grok \
+  --resume SESSION_UUID \
+  --background \
+  --root /workspace/project \
+  --model grok-4.6 \
+  --effort xhigh
 
 agemux send nightly-review "Continue the scheduled review."
 agemux send nightly-review --file /path/to/prompt.txt
@@ -98,7 +110,7 @@ Sessions that are already attached in another terminal are not force-detached by
 
 If `shpool attach` exits while the session is still live and disconnected, agemux automatically reconnects up to three times with bounded backoff. The retry budget resets after a stable minute so isolated interruptions do not accumulate over a long-running terminal. agemux also resets bracketed paste, focus tracking, modify-other-keys, and the full Kitty keyboard-protocol stack at TUI and attachment boundaries so a crashed nested CLI does not leak escape sequences into the shell.
 
-`agemux restart NAME` and the interactive `r` key stop the selected Codex process and immediately resume the same root thread by UUID. The confirmation shows the internal agemux session name and verified thread UUID so a changing display title cannot hide the target identity. This bypasses the slower Codex resume picker and preserves the session root, title, model, reasoning effort, service tier, and extra Codex config stored by agemux. Restart ignores open subagent rollout files and is limited to sessions whose exact root thread UUID can be verified before the old process is stopped. Resume starts and restarts are serialized by UUID and refuse a thread already owned by another live or starting agemux session. Sessions selected through the interactive Codex resume picker are checked again as soon as their thread UUID becomes observable; a duplicate picker session is closed instead of claiming the same thread.
+`agemux restart NAME` and the interactive `r` key stop the selected Codex or Grok process and immediately resume the same session by UUID. The confirmation shows the internal agemux session name and verified session UUID so a changing display title cannot hide the target identity. This bypasses the slower resume picker and preserves the session root, title, model, and reasoning effort stored by agemux. Codex restarts also keep service tier and extra Codex config. Restart ignores open subagent rollout files and is limited to sessions whose exact session UUID can be verified before the old process is stopped. Grok session IDs are read from `~/.grok/active_sessions.json` for the live Grok process. Resume starts and restarts are serialized by UUID and refuse a session already owned by another live or starting agemux session. Sessions selected through the interactive picker are checked again as soon as their session UUID becomes observable; a duplicate picker session is closed instead of claiming the same session.
 
 When an explicit kill finds a stale disconnected shpool entry whose child process has already exited, agemux repairs the stale entry and retries the kill once. Attached sessions do not enter this recovery path.
 
@@ -149,26 +161,29 @@ Without the shim, a plain `claude` command uses Claude Code's default config dir
 - `shpool` for `agemux`
 - Claude Code CLI for Claude sessions and account management
 - Codex CLI for Codex sessions
+- Grok Build CLI for Grok sessions
 - `uv` only if you opt in to installing the companion `codex-lb` tool with `--with-codex-lb`. The installer installs `uv` if it is missing.
 
-`agemux` launches your local `codex` and `claude` commands. It does not bundle or proxy either provider's service.
+`agemux` launches your local `codex`, `claude`, and `grok` commands. It does not bundle or proxy any provider's service.
 
 ## Safety
 
 Agent Multiplexer is a local terminal/session tool, not a hosted proxy, token broker, or quota aggregation service. It runs official local CLIs using local configuration that you control. Use it only with accounts and credentials you are authorized to operate, and follow the applicable provider terms and your organization policy.
 
-Agent Multiplexer does not store Claude or Codex tokens in its own state files. It stores local config directory paths, cached account status, cached usage data, and persistent session metadata. Cached Claude usage data can include local Claude Code status fields such as session identifiers, model names, and context-window metadata. Codex account switching copies an existing local Codex auth file into Codex's active auth path; it does not log out, revoke tokens, or change provider-side limits.
+Agent Multiplexer does not store Claude, Codex, or Grok tokens in its own state files. It stores local config directory paths, cached account status, cached usage data, and persistent session metadata. Cached Claude usage data can include local Claude Code status fields such as session identifiers, model names, and context-window metadata. Codex account switching copies an existing local Codex auth file into Codex's active auth path; it does not log out, revoke tokens, or change provider-side limits.
 
 Agent sessions launched by `agemux` use the official CLI dangerous permission bypass flags by default:
 
 - Codex: `--dangerously-bypass-approvals-and-sandbox`
 - Claude: `--dangerously-skip-permissions`
+- Grok: `--always-approve`
 
 Use Agent Multiplexer this way only on trusted local machines or disposable sandboxes. To disable the bypass flags:
 
 ```sh
 AGEMUX_CODEX_DANGEROUS=0 agemux codex
 AGEMUX_CLAUDE_DANGEROUS=0 agemux claude
+AGEMUX_GROK_DANGEROUS=0 agemux grok
 ```
 
 ## Data

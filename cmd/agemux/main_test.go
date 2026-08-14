@@ -90,9 +90,12 @@ func TestRunCommandDoesNotWrapEnvWhenNoOverrides(t *testing.T) {
 		"AGEMUX_CODEX_BIN",
 		"AGEMUX_CODEX_DANGEROUS",
 		"AGEMUX_DATA_DIR",
+		"AGEMUX_GROK_BIN",
+		"AGEMUX_GROK_DANGEROUS",
 		"AGEMUX_PREFIX",
 		"AGEMUX_SHPOOL_BIN",
 		"CODEX_HOME",
+		"GROK_HOME",
 	} {
 		old, had := os.LookupEnv(key)
 		os.Unsetenv(key)
@@ -137,6 +140,7 @@ func TestClaudeAgentArgsUseAccountRunner(t *testing.T) {
 func TestAgentArgsUseDangerousPermissionsByDefault(t *testing.T) {
 	t.Setenv("AGEMUX_CODEX_DANGEROUS", "")
 	t.Setenv("AGEMUX_CLAUDE_DANGEROUS", "")
+	t.Setenv("AGEMUX_GROK_DANGEROUS", "")
 
 	codexArgs, err := agentArgs("codex-resume", "/tmp/project")
 	if err != nil {
@@ -153,11 +157,26 @@ func TestAgentArgsUseDangerousPermissionsByDefault(t *testing.T) {
 	if !containsArg(claudeArgs, "--dangerously-skip-permissions") {
 		t.Fatalf("Claude dangerous flag missing by default: %#v", claudeArgs)
 	}
+
+	grokArgs, err := agentArgs("grok-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsArg(grokArgs, "--always-approve") {
+		t.Fatalf("Grok dangerous flag missing by default: %#v", grokArgs)
+	}
+	if !containsArg(grokArgs, "--cwd") {
+		t.Fatalf("Grok cwd flag missing: %#v", grokArgs)
+	}
+	if containsArg(grokArgs, "--resume") {
+		t.Fatalf("Grok welcome picker should not pass --resume without a session ID: %#v", grokArgs)
+	}
 }
 
 func TestAgentArgsCanDisableDangerousPermissions(t *testing.T) {
 	t.Setenv("AGEMUX_CODEX_DANGEROUS", "0")
 	t.Setenv("AGEMUX_CLAUDE_DANGEROUS", "false")
+	t.Setenv("AGEMUX_GROK_DANGEROUS", "0")
 
 	codexArgs, err := agentArgs("codex-resume", "/tmp/project")
 	if err != nil {
@@ -173,6 +192,14 @@ func TestAgentArgsCanDisableDangerousPermissions(t *testing.T) {
 	}
 	if containsArg(claudeArgs, "--dangerously-skip-permissions") {
 		t.Fatalf("Claude dangerous flag should be disabled: %#v", claudeArgs)
+	}
+
+	grokArgs, err := agentArgs("grok-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsArg(grokArgs, "--always-approve") {
+		t.Fatalf("Grok dangerous flag should be disabled: %#v", grokArgs)
 	}
 }
 
@@ -195,6 +222,119 @@ func TestAgentArgsUseNamedResumeOptions(t *testing.T) {
 	}
 	if args[len(args)-2] != "resume" || args[len(args)-1] != "019f-test" {
 		t.Fatalf("resume UUID must follow the resume subcommand: %#v", args)
+	}
+}
+
+func TestGrokAgentArgsUseNamedResumeOptions(t *testing.T) {
+	resumeID := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	args, err := agentArgsWithMeta("grok-resume", "/tmp/project", map[string]any{
+		"resume_id":        resumeID,
+		"model":            "grok-4.6",
+		"reasoning_effort": "xhigh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--cwd /tmp/project", "--model grok-4.6", "--reasoning-effort xhigh", "--resume " + resumeID} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("named Grok args missing %q: %#v", want, args)
+		}
+	}
+}
+
+func TestGrokFreshArgsUseSessionID(t *testing.T) {
+	resumeID := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	args, err := agentArgsWithMeta("grok-fresh", "/tmp/project", map[string]any{"resume_id": resumeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--session-id "+resumeID) {
+		t.Fatalf("grok-fresh missing --session-id: %#v", args)
+	}
+	if containsArg(args, "--resume") {
+		t.Fatalf("grok-fresh should not pass --resume: %#v", args)
+	}
+}
+
+func TestGrokFreshArgsRequireSessionID(t *testing.T) {
+	_, err := agentArgs("grok-fresh", "/tmp/project")
+	if err == nil || !strings.Contains(err.Error(), "requires a session UUID") {
+		t.Fatalf("expected grok-fresh UUID error, got %v", err)
+	}
+}
+
+func TestStartCommandRejectsCodexOnlyFlagsForGrok(t *testing.T) {
+	err := startCommand([]string{"grok", "nightly", "--service-tier", "default"})
+	if err == nil || !strings.Contains(err.Error(), "--service-tier") {
+		t.Fatalf("expected Codex-only flag error, got %v", err)
+	}
+}
+
+func TestStartNamedGrokCreatesBackgroundSession(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	argsFile := filepath.Join(dir, "args")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n"+
+			"printf '%s\\n' \"$*\" > "+shellQuote(argsFile)+"\n",
+	)
+	withShpoolBin(t, fake)
+	withoutControlReadyWait(t)
+
+	root := filepath.Join(dir, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	resumeID := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	if err := startNamedSession("grok", "nightly-grok", root, resumeID, "grok-4.6", "xhigh", "", nil, "Grok review", true); err != nil {
+		t.Fatal(err)
+	}
+	row := sessionMeta("nightly-grok")
+	if row["provider"] != "grok" || row["kind"] != "grok-resume" || row["resume_id"] != resumeID || row["model"] != "grok-4.6" || row["title"] != "Grok review" {
+		t.Fatalf("unexpected Grok session metadata: %#v", row)
+	}
+}
+
+func TestStartNamedGrokFreshAssignsSessionID(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n",
+	)
+	withShpoolBin(t, fake)
+	withoutControlReadyWait(t)
+
+	root := filepath.Join(dir, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := startNamedSession("grok", "fresh-grok", root, "", "", "", "", nil, "Fresh Grok", true); err != nil {
+		t.Fatal(err)
+	}
+	row := sessionMeta("fresh-grok")
+	if row["kind"] != "grok-fresh" {
+		t.Fatalf("fresh start changed kind: %#v", row)
+	}
+	if !validThreadID(stringValue(row["resume_id"])) {
+		t.Fatalf("fresh Grok start did not assign a session UUID: %#v", row)
+	}
+}
+
+func TestDiscoverGrokSessionIDFromActiveSessions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GROK_HOME", dir)
+	resumeID := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	payload := `[{"session_id":"` + resumeID + `","pid":4242,"cwd":"/tmp/project"}]`
+	if err := os.WriteFile(filepath.Join(dir, "active_sessions.json"), []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := grokSessionIDForPID(4242); got != resumeID {
+		t.Fatalf("grokSessionIDForPID = %q, want %q", got, resumeID)
+	}
+	if got := grokSessionIDForPID(99); got != "" {
+		t.Fatalf("unexpected session for other pid: %q", got)
 	}
 }
 
@@ -942,7 +1082,7 @@ func TestRestartCodexSessionPreservesThreadAndLaunchSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output != "restarted "+name+" as Codex thread "+threadID+"\n" {
+	if output != "restarted "+name+" as Codex session "+threadID+"\n" {
 		t.Fatalf("restart output = %q", output)
 	}
 	called, err := os.ReadFile(calls)
@@ -997,7 +1137,7 @@ func TestRestartCodexSessionUsesLiveThreadInsteadOfStaleMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output != "restarted "+name+" as Codex thread "+liveID+"\n" {
+	if output != "restarted "+name+" as Codex session "+liveID+"\n" {
 		t.Fatalf("restart output = %q", output)
 	}
 	if got := stringValue(sessionMeta(name)["resume_id"]); got != liveID {
@@ -1101,7 +1241,7 @@ func TestRestartCodexSessionRejectsUnverifiedThreadWithoutKilling(t *testing.T) 
 	}
 
 	err := restartCodexSession(name)
-	if err == nil || !strings.Contains(err.Error(), "could not determine the active Codex thread UUID") {
+	if err == nil || !strings.Contains(err.Error(), "could not determine the active Codex session UUID") {
 		t.Fatalf("unexpected restart result: %v", err)
 	}
 	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
@@ -1125,11 +1265,85 @@ func TestRestartCodexSessionRejectsClaudeWithoutKilling(t *testing.T) {
 	}
 
 	err := restartCodexSession(name)
-	if err == nil || !strings.Contains(err.Error(), "is not a Codex session") {
+	if err == nil || !strings.Contains(err.Error(), "is not a Codex or Grok session") {
 		t.Fatalf("unexpected restart result: %v", err)
 	}
 	if _, err := os.Stat(calls); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Claude session reached shpool kill: %v", err)
+	}
+}
+
+func TestRestartGrokSessionPreservesLaunchSettings(t *testing.T) {
+	const name = "restart-grok-settings"
+	threadID := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == name {
+			return threadID
+		}
+		return ""
+	})
+	withoutControlReadyWait(t)
+	killed := filepath.Join(dir, "killed")
+	calls := filepath.Join(dir, "calls")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  if [[ -f "+shellQuote(killed)+" ]]; then printf '{\"sessions\":[]}'; else printf '{\"sessions\":[{\"name\":\""+name+"\",\"status\":\"Disconnected\"}]}'; fi\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"printf '%s\\n' \"$*\" >> "+shellQuote(calls)+"\n"+
+			"if [[ \"$1\" == \"kill\" ]]; then touch "+shellQuote(killed)+"; fi\n"+
+			"exit 0\n",
+	)
+	withShpoolBin(t, fake)
+	root := filepath.Join(dir, "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateMeta(name, map[string]any{
+		"provider":         "grok",
+		"kind":             "grok-resume",
+		"root":             root,
+		"title":            "Grok thread",
+		"resume_id":        threadID,
+		"model":            "grok-4.6",
+		"reasoning_effort": "xhigh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureStdout(t, func() error { return restartCodexSession(name) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "restarted "+name+" as Grok session "+threadID+"\n" {
+		t.Fatalf("restart output = %q", output)
+	}
+	row := sessionMeta(name)
+	if row["resume_id"] != threadID || row["model"] != "grok-4.6" || row["reasoning_effort"] != "xhigh" || row["title"] != "Grok thread" {
+		t.Fatalf("restart changed Grok launch metadata: %#v", row)
+	}
+}
+
+func TestRestartConfirmationPromptUsesGrokLabel(t *testing.T) {
+	const threadID = "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	if err := updateMeta("grok-session", map[string]any{"provider": "grok", "kind": "grok-resume"}); err != nil {
+		t.Fatal(err)
+	}
+	withCodexThreadDiscovery(t, func(sessionName string) string {
+		if sessionName == "grok-session" {
+			return threadID
+		}
+		return ""
+	})
+	prompt := restartConfirmationPrompt(menuItem{Type: "session", Name: "grok-session", Label: "Visible grok"})
+	for _, value := range []string{"Visible grok", "grok-session", threadID, "Grok session"} {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("confirmation %q is missing %q", prompt, value)
+		}
 	}
 }
 

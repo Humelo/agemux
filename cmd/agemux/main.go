@@ -65,9 +65,10 @@ var (
 	threadIDRE       = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	shpoolBin        = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
 	codexBin         = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
+	grokBin          = resolveBinary("AGEMUX_GROK_BIN", filepath.Join(homeDir(), ".local/bin/grok"), "grok")
 	attachRetrySleep = time.Sleep
 	waitControlReady = waitForControlReady
-	discoverThreadID = discoverCodexThreadID
+	discoverThreadID = discoverSessionThreadID
 )
 
 type controlRequest struct {
@@ -437,6 +438,10 @@ func runMain(argv []string) error {
 		return create("claude-resume")
 	case cmd == "claude-new":
 		return create("claude-fresh")
+	case cmd == "grok":
+		return create("grok-resume")
+	case cmd == "grok-new":
+		return create("grok-fresh")
 	case cmd == "start":
 		return startCommand(argv[2:])
 	case cmd == "send":
@@ -475,7 +480,9 @@ func usage(prog string) {
   %[1]s codex-new        new shpool session running fresh Codex
   %[1]s claude           new shpool session running Claude resume picker
   %[1]s claude-new       new shpool session running fresh Claude
-  %[1]s start codex NAME [--resume UUID] [--background] [--root DIR]
+  %[1]s grok             new shpool session running Grok welcome/resume picker
+  %[1]s grok-new         new shpool session running fresh Grok
+  %[1]s start {codex|grok} NAME [--resume UUID] [--background] [--root DIR]
   %[1]s send NAME [TEXT]
   %[1]s send NAME --file PATH
   %[1]s capture NAME [--lines N]
@@ -488,16 +495,16 @@ func usage(prog string) {
   %[1]s attach NAME      attach to a live session
   %[1]s attach --force NAME
   %[1]s detach NAME      detach a session without stopping it
-  %[1]s restart NAME     restart the exact Codex thread in place
+  %[1]s restart NAME     restart the exact Codex or Grok session in place
   %[1]s kill NAME        kill a session
 
-Interactive keys: Arrows, Enter, c, C, l, L, d detach, r restart, k kill, q/Esc.
+Interactive keys: Arrows, Enter, c, C, l, L, g, G, d detach, r restart, k kill, q/Esc.
 Close the VS Code terminal tab to detach without killing the agent.
 Already-attached sessions are not force-detached by default; use attach --force intentionally.
-Codex and Claude run with their dangerous permission bypass flags by default.
-Set AGEMUX_CODEX_DANGEROUS=0 or AGEMUX_CLAUDE_DANGEROUS=0 to disable them.
+Codex, Claude, and Grok run with their dangerous permission bypass flags by default.
+Set AGEMUX_CODEX_DANGEROUS=0, AGEMUX_CLAUDE_DANGEROUS=0, or AGEMUX_GROK_DANGEROUS=0 to disable them.
 Set AGEMUX_ALT_SCREEN=1 to use Codex's alternate screen mode.
-Set AGEMUX_CODEX_BIN, AGEMUX_CLAUDE_BIN, or AGEMUX_SHPOOL_BIN to override binary paths.
+Set AGEMUX_CODEX_BIN, AGEMUX_CLAUDE_BIN, AGEMUX_GROK_BIN, or AGEMUX_SHPOOL_BIN to override binary paths.
 `, prog)
 }
 
@@ -728,7 +735,11 @@ func withStartLock(name string, fn func() error) error {
 }
 
 func withCodexThreadLock(threadID string, fn func() error) error {
-	return withStartLock("codex-thread:"+strings.ToLower(threadID), fn)
+	return withSessionThreadLock("codex", threadID, fn)
+}
+
+func withSessionThreadLock(provider, threadID string, fn func() error) error {
+	return withStartLock(provider+"-thread:"+strings.ToLower(threadID), fn)
 }
 
 func startReservationTTL() time.Duration {
@@ -950,6 +961,30 @@ func agentArgsWithMeta(kind, root string, row map[string]any) ([]string, error) 
 			args = append(args, "--resume")
 		}
 		return args, nil
+	case provider == "grok" && (mode == "resume" || mode == "fresh"):
+		args := []string{grokBin}
+		if defaultDangerousEnv("AGEMUX_GROK_DANGEROUS") {
+			args = append(args, "--always-approve")
+		}
+		args = append(args, "--cwd", root)
+		if model := stringValue(row["model"]); model != "" {
+			args = append(args, "--model", model)
+		}
+		if effort := stringValue(row["reasoning_effort"]); effort != "" {
+			args = append(args, "--reasoning-effort", effort)
+		}
+		if mode == "resume" {
+			if resumeID := stringValue(row["resume_id"]); resumeID != "" {
+				args = append(args, "--resume", resumeID)
+			}
+		} else {
+			resumeID := stringValue(row["resume_id"])
+			if resumeID == "" {
+				return nil, fmt.Errorf("grok-fresh requires a session UUID")
+			}
+			args = append(args, "--session-id", resumeID)
+		}
+		return args, nil
 	default:
 		return nil, fmt.Errorf("bad run kind: %q", kind)
 	}
@@ -965,6 +1000,10 @@ func agentLabel(kind string) string {
 		return "Claude"
 	case "claude-fresh":
 		return "Claude new"
+	case "grok-resume":
+		return "Grok"
+	case "grok-fresh":
+		return "Grok new"
 	default:
 		return kind
 	}
@@ -1001,6 +1040,7 @@ func cleanTitle(title string) string {
 	title = strings.TrimSpace(title)
 	title = strings.TrimPrefix(title, "codex ")
 	title = strings.TrimPrefix(title, "claude ")
+	title = strings.TrimPrefix(title, "grok ")
 	if title == "" {
 		return ""
 	}
@@ -1075,10 +1115,13 @@ func runCommand(name, kind, root string) string {
 		"AGEMUX_CODEX_DANGEROUS",
 		"AGEMUX_CONTROL_DIR",
 		"AGEMUX_DATA_DIR",
+		"AGEMUX_GROK_BIN",
+		"AGEMUX_GROK_DANGEROUS",
 		"AGEMUX_PREFIX",
 		"AGEMUX_SHPOOL_BIN",
 		"CLSW_DATA_DIR",
 		"CODEX_HOME",
+		"GROK_HOME",
 	}
 	var args []string
 	hasEnv := false
@@ -1259,9 +1302,10 @@ func create(kind string) error {
 }
 
 func startCommand(args []string) error {
-	if len(args) < 2 || args[0] != "codex" {
-		return fmt.Errorf("usage: agemux start codex NAME [--resume UUID] [--background] [--root DIR] [--model MODEL] [--effort LEVEL] [--service-tier TIER] [--config KEY=VALUE] [--title TITLE]")
+	if len(args) < 2 || (args[0] != "codex" && args[0] != "grok") {
+		return fmt.Errorf("usage: agemux start {codex|grok} NAME [--resume UUID] [--background] [--root DIR] [--model MODEL] [--effort LEVEL] [--service-tier TIER] [--config KEY=VALUE] [--title TITLE]")
 	}
+	provider := args[0]
 	name := args[1]
 	root := rootDir()
 	resumeID := ""
@@ -1300,12 +1344,18 @@ func startCommand(args []string) error {
 			i++
 			effort = args[i]
 		case "--service-tier":
+			if provider != "codex" {
+				return fmt.Errorf("--service-tier is only supported for agemux start codex")
+			}
 			if i+1 >= len(args) || args[i+1] == "" {
 				return fmt.Errorf("--service-tier requires a value")
 			}
 			i++
 			serviceTier = args[i]
 		case "--config":
+			if provider != "codex" {
+				return fmt.Errorf("--config is only supported for agemux start codex")
+			}
 			if i+1 >= len(args) || !strings.Contains(args[i+1], "=") {
 				return fmt.Errorf("--config requires KEY=VALUE")
 			}
@@ -1321,16 +1371,27 @@ func startCommand(args []string) error {
 			return fmt.Errorf("unknown start option: %s", args[i])
 		}
 	}
-	return startNamedCodex(name, root, resumeID, model, effort, serviceTier, configs, title, background)
+	return startNamedSession(provider, name, root, resumeID, model, effort, serviceTier, configs, title, background)
 }
 
 func startNamedCodex(name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background bool) error {
-	return startNamedCodexWithAnnouncement(name, root, resumeID, model, effort, serviceTier, configs, title, background, true)
+	return startNamedSession("codex", name, root, resumeID, model, effort, serviceTier, configs, title, background)
+}
+
+func startNamedSession(provider, name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background bool) error {
+	return startNamedSessionWithAnnouncement(provider, name, root, resumeID, model, effort, serviceTier, configs, title, background, true)
 }
 
 func startNamedCodexWithAnnouncement(name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background, announce bool) error {
+	return startNamedSessionWithAnnouncement("codex", name, root, resumeID, model, effort, serviceTier, configs, title, background, announce)
+}
+
+func startNamedSessionWithAnnouncement(provider, name, root, resumeID, model, effort, serviceTier string, configs []string, title string, background, announce bool) error {
 	if err := ensureName(name); err != nil {
 		return err
+	}
+	if provider != "codex" && provider != "grok" {
+		return fmt.Errorf("unsupported start provider: %s", provider)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -1344,27 +1405,37 @@ func startNamedCodexWithAnnouncement(name, root, resumeID, model, effort, servic
 		return fmt.Errorf("root is not a directory: %s", absRoot)
 	}
 	launch := func() error {
-		return startNamedCodexPrepared(name, absRoot, resumeID, model, effort, serviceTier, configs, title, background, announce)
+		return startNamedSessionPrepared(provider, name, absRoot, resumeID, model, effort, serviceTier, configs, title, background, announce)
 	}
 	if resumeID == "" {
 		return launch()
 	}
-	return withCodexThreadLock(resumeID, func() error {
-		owners, err := otherCodexThreadOwners(name, resumeID)
+	return withSessionThreadLock(provider, resumeID, func() error {
+		owners, err := otherSessionThreadOwners(name, provider, resumeID)
 		if err != nil {
-			return fmt.Errorf("check Codex thread ownership: %w", err)
+			return fmt.Errorf("check %s session ownership: %w", providerLabel(provider), err)
 		}
 		if len(owners) > 0 {
-			return fmt.Errorf("Codex thread %s is already owned by live agemux session(s): %s", resumeID, strings.Join(owners, ", "))
+			return fmt.Errorf("%s session %s is already owned by live agemux session(s): %s", providerLabel(provider), resumeID, strings.Join(owners, ", "))
 		}
 		return launch()
 	})
 }
 
 func startNamedCodexPrepared(name, absRoot, resumeID, model, effort, serviceTier string, configs []string, title string, background, announce bool) error {
-	kind := "codex-fresh"
+	return startNamedSessionPrepared("codex", name, absRoot, resumeID, model, effort, serviceTier, configs, title, background, announce)
+}
+
+func startNamedSessionPrepared(provider, name, absRoot, resumeID, model, effort, serviceTier string, configs []string, title string, background, announce bool) error {
+	kind := provider + "-fresh"
 	if resumeID != "" {
-		kind = "codex-resume"
+		kind = provider + "-resume"
+	} else if provider == "grok" {
+		sessionID, err := randomSessionUUID()
+		if err != nil {
+			return err
+		}
+		resumeID = sessionID
 	}
 	startToken := randomStartToken()
 	if err := reserveNamedCodexStart(name, kind, absRoot, resumeID, model, effort, serviceTier, configs, title, startToken); err != nil {
@@ -1418,6 +1489,35 @@ func randomStartToken() string {
 		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	return hex.EncodeToString(value)
+}
+
+func randomSessionUUID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	encoded := hex.EncodeToString(value)
+	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32], nil
+}
+
+func assignGrokFreshSessionID(name string, row map[string]any) (map[string]any, error) {
+	if stringValue(row["resume_id"]) != "" {
+		return row, nil
+	}
+	sessionID, err := randomSessionUUID()
+	if err != nil {
+		return row, err
+	}
+	if err := updateMeta(name, map[string]any{"resume_id": sessionID}); err != nil {
+		return row, err
+	}
+	if row == nil {
+		row = map[string]any{}
+	}
+	row["resume_id"] = sessionID
+	return row, nil
 }
 
 func reserveNamedCodexStart(name, kind, root, resumeID, model, effort, serviceTier string, configs []string, title, startToken string) error {
@@ -2463,7 +2563,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.14")
+	req.Header.Set("User-Agent", "agemux/0.1.15")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -3177,12 +3277,12 @@ func restartCodexSession(name string) error {
 	meta, _ := session["meta"].(map[string]any)
 	kind := stringValue(meta["kind"])
 	provider, _ := splitKind(kind)
-	if provider != "codex" {
-		return fmt.Errorf("session %q is not a Codex session", name)
+	if provider != "codex" && provider != "grok" {
+		return fmt.Errorf("session %q is not a Codex or Grok session", name)
 	}
 	resumeID := discoverThreadID(name)
 	if !validThreadID(resumeID) {
-		return fmt.Errorf("could not determine the active Codex thread UUID for %q; keep the session running and try again", name)
+		return fmt.Errorf("could not determine the active %s session UUID for %q; keep the session running and try again", providerLabel(provider), name)
 	}
 
 	root := stringValue(meta["root"])
@@ -3209,15 +3309,16 @@ func restartCodexSession(name string) error {
 	effort := stringValue(meta["reasoning_effort"])
 	serviceTier := stringValue(meta["service_tier"])
 	configs := stringSliceValue(meta["codex_config"])
-	return withCodexThreadLock(resumeID, func() error {
-		owners, err := otherCodexThreadOwners(name, resumeID)
+	return withSessionThreadLock(provider, resumeID, func() error {
+		owners, err := otherSessionThreadOwners(name, provider, resumeID)
 		if err != nil {
-			return fmt.Errorf("check Codex thread ownership: %w", err)
+			return fmt.Errorf("check %s session ownership: %w", providerLabel(provider), err)
 		}
 		if len(owners) > 0 {
 			return fmt.Errorf(
-				"session %q shares Codex thread %s with live agemux session(s): %s; restart refused to avoid duplicate agents",
+				"session %q shares %s session %s with live agemux session(s): %s; restart refused to avoid duplicate agents",
 				name,
+				providerLabel(provider),
 				resumeID,
 				strings.Join(owners, ", "),
 			)
@@ -3226,16 +3327,19 @@ func restartCodexSession(name string) error {
 		if err := killSession(name); err != nil {
 			return err
 		}
-		if err := startNamedCodexPrepared(name, root, resumeID, model, effort, serviceTier, configs, title, true, false); err != nil {
-			return fmt.Errorf("restart %q on Codex thread %s failed: %w; recover with %s", name, resumeID, err, shellJoin(restartRecoveryCommand(name, root, resumeID, model, effort, serviceTier, configs, title)))
+		if err := startNamedSessionPrepared(provider, name, root, resumeID, model, effort, serviceTier, configs, title, true, false); err != nil {
+			return fmt.Errorf("restart %q on %s session %s failed: %w; recover with %s", name, providerLabel(provider), resumeID, err, shellJoin(restartRecoveryCommand(provider, name, root, resumeID, model, effort, serviceTier, configs, title)))
 		}
-		fmt.Printf("restarted %s as Codex thread %s\n", name, resumeID)
+		fmt.Printf("restarted %s as %s session %s\n", name, providerLabel(provider), resumeID)
 		return nil
 	})
 }
 
-func restartRecoveryCommand(name, root, resumeID, model, effort, serviceTier string, configs []string, title string) []string {
-	args := []string{executablePath(), "start", "codex", name, "--resume", resumeID, "--background", "--root", root}
+func restartRecoveryCommand(provider, name, root, resumeID, model, effort, serviceTier string, configs []string, title string) []string {
+	if provider == "" {
+		provider = "codex"
+	}
+	args := []string{executablePath(), "start", provider, name, "--resume", resumeID, "--background", "--root", root}
 	for _, pair := range []struct{ flag, value string }{
 		{"--model", model},
 		{"--effort", effort},
@@ -3258,6 +3362,10 @@ func validThreadID(value string) bool {
 }
 
 func otherCodexThreadOwners(name, threadID string) ([]string, error) {
+	return otherSessionThreadOwners(name, "codex", threadID)
+}
+
+func otherSessionThreadOwners(name, provider, threadID string) ([]string, error) {
 	sessions, err := agemuxSessions()
 	if err != nil {
 		return nil, err
@@ -3269,12 +3377,18 @@ func otherCodexThreadOwners(name, threadID string) ([]string, error) {
 			continue
 		}
 		meta, _ := session["meta"].(map[string]any)
-		provider, _ := splitKind(stringValue(meta["kind"]))
+		otherProvider, _ := splitKind(stringValue(meta["kind"]))
+		if otherProvider == "" {
+			otherProvider = stringValue(meta["provider"])
+		}
+		if otherProvider == "" {
+			otherProvider = "codex"
+		}
+		if otherProvider != provider {
+			continue
+		}
 		otherThreadID := discoverThreadID(otherName)
 		if !validThreadID(otherThreadID) {
-			if provider != "codex" {
-				continue
-			}
 			otherThreadID = stringValue(meta["resume_id"])
 		}
 		if !strings.EqualFold(otherThreadID, threadID) {
@@ -3287,8 +3401,14 @@ func otherCodexThreadOwners(name, threadID string) ([]string, error) {
 			if otherName == name || !startReservationActive(row) {
 				continue
 			}
-			provider, _ := splitKind(stringValue(row["kind"]))
-			if provider == "codex" && strings.EqualFold(stringValue(row["resume_id"]), threadID) {
+			otherProvider, _ := splitKind(stringValue(row["kind"]))
+			if otherProvider == "" {
+				otherProvider = stringValue(row["provider"])
+			}
+			if otherProvider == "" {
+				otherProvider = "codex"
+			}
+			if otherProvider == provider && strings.EqualFold(stringValue(row["resume_id"]), threadID) {
 				owners[otherName] = true
 			}
 		}
@@ -3304,12 +3424,65 @@ func otherCodexThreadOwners(name, threadID string) ([]string, error) {
 	return result, nil
 }
 
+func discoverSessionThreadID(name string) string {
+	provider, _ := splitKind(sessionKind(name))
+	if provider == "" {
+		provider = stringValue(sessionMeta(name)["provider"])
+	}
+	if provider == "grok" {
+		return discoverGrokSessionID(name)
+	}
+	return discoverCodexThreadID(name)
+}
+
 func discoverCodexThreadID(name string) string {
 	pid := findCodexAgentPID(name)
 	if pid == 0 {
 		return ""
 	}
 	return codexThreadIDForPID(pid)
+}
+
+func discoverGrokSessionID(name string) string {
+	pid := findGrokAgentPID(name)
+	if pid == 0 {
+		return ""
+	}
+	return grokSessionIDForPID(pid)
+}
+
+func grokHomeDir() string {
+	if value := os.Getenv("GROK_HOME"); value != "" {
+		return expandPath(value)
+	}
+	return filepath.Join(homeDir(), ".grok")
+}
+
+type grokActiveSession struct {
+	SessionID string `json:"session_id"`
+	PID       int    `json:"pid"`
+}
+
+func grokSessionIDForPID(pid int) string {
+	content, err := os.ReadFile(filepath.Join(grokHomeDir(), "active_sessions.json"))
+	if err != nil {
+		return ""
+	}
+	var sessions []grokActiveSession
+	if json.Unmarshal(content, &sessions) != nil {
+		return ""
+	}
+	match := ""
+	for _, session := range sessions {
+		if session.PID != pid || !validThreadID(session.SessionID) {
+			continue
+		}
+		if match != "" && !strings.EqualFold(match, session.SessionID) {
+			return ""
+		}
+		match = session.SessionID
+	}
+	return match
 }
 
 func codexThreadIDForPID(pid int) string {
@@ -3444,6 +3617,81 @@ func findCodexAgentPID(name string) int {
 	return 0
 }
 
+func findGrokAgentPID(name string) int {
+	return findAgentPID(name, isGrokExecutable, isGrokCommand)
+}
+
+func findAgentPID(name string, matchExec func(string) bool, matchCommand func(string) bool) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return findAgentPIDWithPS(name, matchCommand)
+	}
+	runnerPID := 0
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		args := procArgs(pid)
+		if len(args) >= 3 && filepath.Base(args[0]) == "agemux" && args[1] == "run" && args[2] == name {
+			runnerPID = pid
+			break
+		}
+	}
+	if runnerPID == 0 {
+		return 0
+	}
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || procParentPID(pid) != runnerPID {
+			continue
+		}
+		args := procArgs(pid)
+		if len(args) > 0 && matchExec(args[0]) {
+			return pid
+		}
+	}
+	return 0
+}
+
+func findAgentPIDWithPS(name string, matchCommand func(string) bool) int {
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return 0
+	}
+	runnerPID := 0
+	type processRow struct {
+		pid, parent int
+		command     string
+	}
+	var rows []processRow
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		parent, parentErr := strconv.Atoi(fields[1])
+		if pidErr != nil || parentErr != nil {
+			continue
+		}
+		command := strings.Join(fields[2:], " ")
+		rows = append(rows, processRow{pid: pid, parent: parent, command: command})
+		if isAgemuxRunnerCommand(command, name) {
+			runnerPID = pid
+		}
+	}
+	if runnerPID == 0 {
+		return 0
+	}
+	for _, row := range rows {
+		if row.parent == runnerPID && matchCommand(row.command) {
+			return row.pid
+		}
+	}
+	return 0
+}
+
 func procArgs(pid int) []string {
 	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
@@ -3535,6 +3783,21 @@ func isCodexExecutable(command string) bool {
 	return base == "codex" || base == filepath.Base(codexBin)
 }
 
+func isGrokExecutable(command string) bool {
+	base := filepath.Base(command)
+	return base == "grok" || base == filepath.Base(grokBin)
+}
+
+func isGrokCommand(command string) bool {
+	fields := strings.Fields(command)
+	for _, field := range fields {
+		if isGrokExecutable(field) {
+			return true
+		}
+	}
+	return false
+}
+
 func updateTrackedCodexThreadID(name string, pid int, threadID string) error {
 	return withMetaLock(func(meta metadata) error {
 		row := meta[name]
@@ -3547,10 +3810,14 @@ func updateTrackedCodexThreadID(name string, pid int, threadID string) error {
 }
 
 func claimTrackedCodexThreadID(name string, pid int, threadID string) ([]string, error) {
+	return claimTrackedSessionThreadID(name, "codex", pid, threadID)
+}
+
+func claimTrackedSessionThreadID(name, provider string, pid int, threadID string) ([]string, error) {
 	var owners []string
-	err := withCodexThreadLock(threadID, func() error {
+	err := withSessionThreadLock(provider, threadID, func() error {
 		var err error
-		owners, err = otherCodexThreadOwners(name, threadID)
+		owners, err = otherSessionThreadOwners(name, provider, threadID)
 		if err != nil || len(owners) > 0 {
 			return err
 		}
@@ -3560,6 +3827,14 @@ func claimTrackedCodexThreadID(name string, pid int, threadID string) ([]string,
 }
 
 func trackCodexThreadID(ctx context.Context, name string, pid int, onConflict func(string, []string)) {
+	trackSessionThreadID(ctx, name, "codex", pid, func() string { return codexThreadIDForPID(pid) }, onConflict)
+}
+
+func trackGrokSessionID(ctx context.Context, name string, pid int, onConflict func(string, []string)) {
+	trackSessionThreadID(ctx, name, "grok", pid, func() string { return grokSessionIDForPID(pid) }, onConflict)
+}
+
+func trackSessionThreadID(ctx context.Context, name, provider string, pid int, discover func() string, onConflict func(string, []string)) {
 	ticker := time.NewTicker(codexThreadTrackInterval)
 	defer ticker.Stop()
 	lastThreadID := ""
@@ -3569,8 +3844,8 @@ func trackCodexThreadID(ctx context.Context, name string, pid int, onConflict fu
 			return
 		default:
 		}
-		if threadID := codexThreadIDForPID(pid); threadID != "" && threadID != lastThreadID {
-			owners, err := claimTrackedCodexThreadID(name, pid, threadID)
+		if threadID := discover(); threadID != "" && threadID != lastThreadID {
+			owners, err := claimTrackedSessionThreadID(name, provider, pid, threadID)
 			if err == nil && len(owners) > 0 {
 				if onConflict != nil {
 					onConflict(threadID, owners)
@@ -3656,8 +3931,10 @@ func menuItems() ([]menuItem, error) {
 	items := []menuItem{
 		{Type: "codex-resume", Label: "Codex resume picker"},
 		{Type: "claude-resume", Label: "Claude resume picker"},
+		{Type: "grok-resume", Label: "Grok resume picker"},
 		{Type: "codex-fresh", Label: "New Codex"},
 		{Type: "claude-fresh", Label: "New Claude"},
+		{Type: "grok-fresh", Label: "New Grok"},
 		{Type: "codex-accounts", Label: "Codex accounts"},
 		{Type: "claude-accounts", Label: "Claude accounts"},
 	}
@@ -3708,6 +3985,8 @@ func providerLabel(provider string) string {
 		return "Codex"
 	case "claude":
 		return "Claude"
+	case "grok":
+		return "Grok"
 	default:
 		if provider == "" {
 			return "Agent"
@@ -3783,7 +4062,7 @@ func plainMenu() (string, string, error) {
 		return "", "", err
 	}
 	fmt.Println()
-	fmt.Println("agemux - persistent Codex and Claude sessions via shpool")
+	fmt.Println("agemux - persistent Codex, Claude, and Grok sessions via shpool")
 	fmt.Println()
 	for i, item := range items {
 		fmt.Printf("%d. %s\n", i+1, item.Label)
@@ -3906,6 +4185,10 @@ func tuiMenu() (string, string, error) {
 			return "new", "claude-resume", nil
 		case key == "L":
 			return "new", "claude-fresh", nil
+		case key == "g":
+			return "new", "grok-resume", nil
+		case key == "G":
+			return "new", "grok-fresh", nil
 		case key == "d":
 			item := items[selected]
 			if item.Type == "session" {
@@ -3931,16 +4214,24 @@ func tuiMenu() (string, string, error) {
 
 func restartConfirmationPrompt(item menuItem) string {
 	prompt := fmt.Sprintf("Restart %s (%s)", item.Label, item.Name)
+	provider, _ := splitKind(sessionKind(item.Name))
+	if provider == "" {
+		provider = stringValue(sessionMeta(item.Name)["provider"])
+	}
+	label := "Codex thread"
+	if provider == "grok" {
+		label = "Grok session"
+	}
 	if threadID := discoverThreadID(item.Name); validThreadID(threadID) {
-		prompt += " on Codex thread " + threadID
+		prompt += " on " + label + " " + threadID
 	} else {
-		prompt += " on its exact Codex thread"
+		prompt += " on its exact " + label
 	}
 	return prompt + "? y/N"
 }
 
 const (
-	actionMenuSize = 6
+	actionMenuSize = 8
 	actionMenuCols = 2
 )
 
@@ -4028,8 +4319,8 @@ func drawMenu(items []menuItem, selected int) {
 		height = 24
 	}
 	fmt.Print("\033[H\033[2J")
-	tuiLine(bold(clip("agemux", width-1)) + clip(" - persistent Codex and Claude sessions via shpool", max(0, width-1-len("agemux"))))
-	tuiLine(dim(clip("Arrows move  Enter open  c Codex  C new Codex  l Claude  L new Claude  d detach  r restart  k kill  q/Esc quit", width-1)))
+	tuiLine(bold(clip("agemux", width-1)) + clip(" - persistent Codex, Claude, and Grok sessions via shpool", max(0, width-1-len("agemux"))))
+	tuiLine(dim(clip("Arrows move  Enter open  c Codex  C new Codex  l Claude  L new Claude  g Grok  G new Grok  d detach  r restart  k kill  q/Esc quit", width-1)))
 	tuiLine(strings.Repeat("-", min(width-1, 1000)))
 	drawActionGrid(items, selected, width)
 	tuiLine("")
@@ -4089,7 +4380,7 @@ func drawSessionList(items []menuItem, selected, width, height int) {
 		tuiLine(dim(clip("  No live sessions", width-1)))
 		return
 	}
-	headerLines := 8
+	headerLines := 9
 	sessionRows := max(1, (height-headerLines-1)/2)
 	sessionSelected := selected - actionCount
 	offset := 0
@@ -4406,6 +4697,13 @@ func runAgentSession(name, kind, root string) error {
 		root = absRoot
 	}
 	configured := sessionMeta(name)
+	if kind == "grok-fresh" {
+		var assignErr error
+		configured, assignErr = assignGrokFreshSessionID(name, configured)
+		if assignErr != nil {
+			return assignErr
+		}
+	}
 	args, err := agentArgsWithMeta(kind, root, configured)
 	if err != nil {
 		return err
@@ -4468,11 +4766,12 @@ func runAgentSession(name, kind, root string) error {
 		"agent_pid":  cmd.Process.Pid,
 	})
 	provider, _ := splitKind(kind)
-	if provider == "codex" {
-		go trackCodexThreadID(ctx, name, cmd.Process.Pid, func(threadID string, owners []string) {
+	if provider == "codex" || provider == "grok" {
+		onConflict := func(threadID string, owners []string) {
 			fmt.Fprintf(
 				os.Stderr,
-				"\r\nagemux: Codex thread %s is already owned by live agemux session(s): %s; closing duplicate session %s\r\n",
+				"\r\nagemux: %s session %s is already owned by live agemux session(s): %s; closing duplicate session %s\r\n",
+				providerLabel(provider),
 				threadID,
 				strings.Join(owners, ", "),
 				name,
@@ -4481,7 +4780,12 @@ func runAgentSession(name, kind, root string) error {
 				_ = cmd.Process.Signal(syscall.SIGTERM)
 			}
 			cancel()
-		})
+		}
+		if provider == "codex" {
+			go trackCodexThreadID(ctx, name, cmd.Process.Pid, onConflict)
+		} else {
+			go trackGrokSessionID(ctx, name, cmd.Process.Pid, onConflict)
+		}
 	}
 	input := newPTYWriter(ctx, ptmxFD, cancel)
 	output := &outputBuffer{limit: controlOutputLimit}

@@ -57,6 +57,8 @@ func main() {
   agemux codex-new        new shpool session running fresh Codex
   agemux claude           new shpool session running Claude resume picker
   agemux claude-new       new shpool session running fresh Claude
+  agemux grok             new shpool session running Grok welcome/resume picker
+  agemux grok-new         new shpool session running fresh Grok
   agemux codex-accounts   list or switch the active Codex auth file
   agemux claude-accounts  open the Claude account switcher
   agemux list             list live agemux shpool sessions
