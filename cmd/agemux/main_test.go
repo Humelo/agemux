@@ -322,6 +322,39 @@ func TestStartNamedGrokFreshAssignsSessionID(t *testing.T) {
 	}
 }
 
+func TestListGrokDiskSessionsReadsSummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GROK_HOME", home)
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "01a0003e" + "-a545-7691-a728-" + "8a6d95595a09"
+	dir := filepath.Join(home, "sessions", urlQueryEscape(abs), id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	summary := `{"generated_title":"Nightly review","updated_at":"2026-08-14T12:00:00Z","info":{"id":"` + id + `"}}`
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte(summary), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := listGrokDiskSessions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != id || sessions[0].Title != "Nightly review" {
+		t.Fatalf("sessions = %#v", sessions)
+	}
+}
+
+func urlQueryEscape(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "/", "%2F"), " ", "%20")
+}
+
 func TestDiscoverGrokSessionIDFromActiveSessions(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GROK_HOME", dir)

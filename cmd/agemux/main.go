@@ -1293,6 +1293,9 @@ func runForegroundCommand(cmd *exec.Cmd) error {
 }
 
 func create(kind string) error {
+	if kind == "grok-resume" {
+		return createGrokResume()
+	}
 	names, err := liveSessionNames()
 	if err != nil {
 		return err
@@ -2566,7 +2569,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.16")
+	req.Header.Set("User-Agent", "agemux/0.1.17")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

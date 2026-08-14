@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.17/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.17/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.17/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.17/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -72,7 +72,7 @@ agemux kill NAME
 - `C`: new Codex session
 - `l`: new Claude resume picker
 - `L`: new Claude session
-- `g`: new Grok welcome/resume picker
+- `g`: Grok resume picker (lists this directory's Grok sessions, then launches `grok --resume`)
 - `G`: new Grok session (`grok --session-id` so it does not open the welcome picker)
 - `Enter` on `Codex accounts`: switch the active Codex CLI auth file or choose `+ Add Codex account`
 - `Enter` on `Claude accounts`: open the Claude account picker
