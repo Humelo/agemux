@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "grok-accounts" {
+		if err := runWindowsGrokAccounts(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "Grok accounts:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help") {
 		fmt.Println(`Usage:
   agemux                  interactive session picker
@@ -61,6 +69,7 @@ func main() {
   agemux grok-new         new shpool session running fresh Grok
   agemux codex-accounts   list or switch the active Codex auth file
   agemux claude-accounts  open the Claude account switcher
+  agemux grok-accounts    list or switch the active Grok auth file
   agemux list             list live agemux shpool sessions
   agemux attach NAME      attach to a live session
   agemux detach NAME      detach a session without stopping it
@@ -282,4 +291,176 @@ func windowsCodexAuthEmail(content []byte) string {
 	}
 	email, _ := claims["email"].(string)
 	return email
+}
+
+func runWindowsGrokAccounts(args []string) error {
+	accounts, err := listWindowsGrokAccounts()
+	if err != nil {
+		return err
+	}
+	command := "list"
+	if len(args) > 0 {
+		command = args[0]
+	}
+	switch command {
+	case "", "list":
+		if len(accounts) == 0 {
+			fmt.Println("no Grok accounts")
+			return nil
+		}
+		for i, acc := range accounts {
+			mark := " "
+			if acc.Current {
+				mark = "*"
+			}
+			fmt.Printf("%s %d  %s\n", mark, i+1, windowsGrokAccountLabel(acc))
+		}
+		return nil
+	case "current":
+		for _, acc := range accounts {
+			if acc.Current {
+				fmt.Printf("current Grok account: %s\n", windowsGrokAccountLabel(acc))
+				return nil
+			}
+		}
+		fmt.Println("no current Grok account")
+		return nil
+	case "change":
+		if len(args) < 2 {
+			return runWindowsGrokAccounts([]string{"list"})
+		}
+		acc, err := resolveWindowsGrokAccount(accounts, args[1])
+		if err != nil {
+			return err
+		}
+		content, err := os.ReadFile(acc.Path)
+		if err != nil {
+			return err
+		}
+		dir := windowsGrokHomeDir()
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		tmp := filepath.Join(dir, fmt.Sprintf(".auth.json.%d.%d.tmp", os.Getpid(), time.Now().UnixNano()))
+		if err := os.WriteFile(tmp, content, 0600); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(dir, "auth.json")); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		fmt.Printf("current Grok account: %s\n", windowsGrokAccountLabel(acc))
+		return nil
+	default:
+		return fmt.Errorf("usage: agemux grok-accounts [list|current|change SELECTOR]")
+	}
+}
+
+type windowsGrokAccount struct {
+	Name    string
+	Path    string
+	Email   string
+	Current bool
+}
+
+func windowsGrokHomeDir() string {
+	if value := os.Getenv("GROK_HOME"); value != "" {
+		return value
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".grok")
+	}
+	return ".grok"
+}
+
+func windowsGrokAccountLabel(acc windowsGrokAccount) string {
+	if acc.Email != "" {
+		return acc.Name + " <" + acc.Email + ">"
+	}
+	return acc.Name
+}
+
+func listWindowsGrokAccounts() ([]windowsGrokAccount, error) {
+	dir := windowsGrokHomeDir()
+	current, _ := os.ReadFile(filepath.Join(dir, "auth.json"))
+	paths, err := filepath.Glob(filepath.Join(dir, "auth.*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var accounts []windowsGrokAccount
+	for _, path := range paths {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "auth."), ".json")
+		if name == "" || name == "json" || strings.HasPrefix(name, "backup-") {
+			continue
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		accounts = append(accounts, windowsGrokAccount{
+			Name:    name,
+			Path:    path,
+			Email:   windowsGrokAuthEmail(content),
+			Current: len(current) > 0 && bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(content)),
+		})
+	}
+	sort.SliceStable(accounts, func(i, j int) bool {
+		if accounts[i].Current != accounts[j].Current {
+			return accounts[i].Current
+		}
+		return accounts[i].Name < accounts[j].Name
+	})
+	return accounts, nil
+}
+
+func resolveWindowsGrokAccount(accounts []windowsGrokAccount, selector string) (windowsGrokAccount, error) {
+	if idx, err := strconv.Atoi(selector); err == nil {
+		if idx < 1 || idx > len(accounts) {
+			return windowsGrokAccount{}, fmt.Errorf("Grok account index out of range: %s", selector)
+		}
+		return accounts[idx-1], nil
+	}
+	query := strings.ToLower(strings.TrimSpace(selector))
+	var matches []windowsGrokAccount
+	for _, acc := range accounts {
+		if strings.ToLower(acc.Name) == query || strings.Contains(strings.ToLower(acc.Email), query) {
+			matches = append(matches, acc)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return windowsGrokAccount{}, fmt.Errorf("ambiguous selector %q", selector)
+	}
+	return windowsGrokAccount{}, fmt.Errorf("no Grok account matches %q", selector)
+}
+
+func windowsGrokAuthEmail(content []byte) string {
+	var data any
+	if err := json.Unmarshal(content, &data); err != nil {
+		return ""
+	}
+	return windowsFindEmail(data)
+}
+
+func windowsFindEmail(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if email, _ := typed["email"].(string); email != "" {
+			return email
+		}
+		for _, child := range typed {
+			if email := windowsFindEmail(child); email != "" {
+				return email
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if email := windowsFindEmail(child); email != "" {
+				return email
+			}
+		}
+	}
+	return ""
 }

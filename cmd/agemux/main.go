@@ -452,6 +452,8 @@ func runMain(argv []string) error {
 		return codexAccountsCommand(argv[2:])
 	case cmd == "claude-accounts":
 		return claudeaccounts.RunMain(append([]string{"agemux claude-accounts"}, argv[2:]...))
+	case cmd == "grok-accounts":
+		return grokAccountsCommand(argv[2:])
 	case cmd == "list":
 		return printList()
 	case cmd == "attach" && len(argv) == 3:
@@ -491,6 +493,7 @@ func usage(prog string) {
   %[1]s codex-accounts change SELECTOR
   %[1]s codex-accounts delete SELECTOR
   %[1]s claude-accounts  open the Claude account switcher
+  %[1]s grok-accounts    open the Grok account switcher
   %[1]s list             list live agemux shpool sessions
   %[1]s attach NAME      attach to a live session
   %[1]s attach --force NAME
@@ -2563,7 +2566,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.15")
+	req.Header.Set("User-Agent", "agemux/0.1.16")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}
@@ -3937,6 +3940,7 @@ func menuItems() ([]menuItem, error) {
 		{Type: "grok-fresh", Label: "New Grok"},
 		{Type: "codex-accounts", Label: "Codex accounts"},
 		{Type: "claude-accounts", Label: "Claude accounts"},
+		{Type: "grok-accounts", Label: "Grok accounts"},
 	}
 	sessions, err := agemuxSessions()
 	if err != nil {
@@ -4041,6 +4045,9 @@ func runAction(action, value string) error {
 		}
 		if value == "claude-accounts" {
 			return claudeaccounts.RunMain([]string{"agemux claude-accounts"})
+		}
+		if value == "grok-accounts" {
+			return grokAccountsInteractive()
 		}
 		return fmt.Errorf("unknown account action: %s", value)
 	case "attach":
@@ -4231,8 +4238,8 @@ func restartConfirmationPrompt(item menuItem) string {
 }
 
 const (
-	actionMenuSize = 8
-	actionMenuCols = 2
+	actionMenuSize = 9
+	actionMenuCols = 3
 )
 
 func actionMenuCount(total int) int {
@@ -4342,20 +4349,22 @@ func drawActionGrid(items []menuItem, selected, width int) {
 	}
 	available := max(1, width-1)
 	gap := 2
-	if available < 24 {
+	if available < 36 {
 		gap = 1
 	}
-	colWidth := max(1, (available-gap)/actionMenuCols)
+	colWidth := max(1, (available-gap*(actionMenuCols-1))/actionMenuCols)
 	rows := (actionCount + actionMenuCols - 1) / actionMenuCols
 	for row := 0; row < rows; row++ {
-		left := row * actionMenuCols
-		right := left + 1
-		if left >= actionCount {
-			break
-		}
-		line := renderActionCell(items[left], left == selected, colWidth)
-		if right < actionCount {
-			line += strings.Repeat(" ", gap) + renderActionCell(items[right], right == selected, colWidth)
+		line := ""
+		for col := 0; col < actionMenuCols; col++ {
+			idx := row*actionMenuCols + col
+			if idx >= actionCount {
+				break
+			}
+			if col > 0 {
+				line += strings.Repeat(" ", gap)
+			}
+			line += renderActionCell(items[idx], idx == selected, colWidth)
 		}
 		tuiLine(line)
 	}
@@ -4380,7 +4389,7 @@ func drawSessionList(items []menuItem, selected, width, height int) {
 		tuiLine(dim(clip("  No live sessions", width-1)))
 		return
 	}
-	headerLines := 9
+	headerLines := 8
 	sessionRows := max(1, (height-headerLines-1)/2)
 	sessionSelected := selected - actionCount
 	offset := 0

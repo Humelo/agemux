@@ -52,7 +52,7 @@ def main():
         agemux_bin = build / ("agemux.exe" if os.name == "nt" else "agemux")
         run([go, "build", "-trimpath", "-o", str(agemux_bin), "./cmd/agemux"], cwd=ROOT)
         help_proc = run([str(agemux_bin), "--help"])
-        needles = ["agemux grok", "agemux grok-new"]
+        needles = ["agemux grok", "agemux grok-new", "grok-accounts"]
         if os.name != "nt":
             needles.append("g, G")
         for needle in needles:
@@ -68,7 +68,7 @@ def main():
             if proc.returncode == 0 or "requires POSIX PTY" not in proc.stderr:
                 raise SystemExit(f"Windows agemux non-help command should fail clearly: {proc.stdout!r} {proc.stderr!r}")
         proc = run([str(agemux_bin), "claude-accounts", "version"])
-        if "Claude accounts 0.1.15" not in proc.stdout:
+        if "Claude accounts 0.1.16" not in proc.stdout:
             raise SystemExit(f"unexpected Claude accounts version output: {proc.stdout!r}")
 
         home = tmp / "home"

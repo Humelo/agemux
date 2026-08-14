@@ -28,7 +28,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.15"
+const version = "0.1.16"
 
 var (
 	home         = homeDir()

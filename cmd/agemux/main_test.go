@@ -1347,6 +1347,122 @@ func TestRestartConfirmationPromptUsesGrokLabel(t *testing.T) {
 	}
 }
 
+func TestGrokAccountsListAndSwitchUseGrokHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GROK_HOME", dir)
+
+	alpha := fakeGrokAuth("alpha@example.invalid")
+	beta := fakeGrokAuth("beta@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, "auth.alpha.json"), []byte(alpha), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.beta.json"), []byte(beta), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(beta), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts, err := listGrokAccounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("accounts len = %d", len(accounts))
+	}
+	if !accounts[0].Current || accounts[0].Name != "beta" {
+		t.Fatalf("expected current beta first, got %#v", accounts[0])
+	}
+	if accounts[0].Email != "beta@example.invalid" {
+		t.Fatalf("email = %q", accounts[0].Email)
+	}
+
+	var alphaAccount grokAccount
+	for _, acc := range accounts {
+		if acc.Name == "alpha" {
+			alphaAccount = acc
+			break
+		}
+	}
+	if alphaAccount.Name == "" {
+		t.Fatal("missing alpha account")
+	}
+	if err := switchGrokAccount(alphaAccount); err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != alpha {
+		t.Fatalf("auth.json was not switched: %q", string(current))
+	}
+}
+
+func TestGrokAccountsImportCurrentAuthFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GROK_HOME", dir)
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(fakeGrokAuth("solo@example.invalid")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := listGrokAccounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || !accounts[0].Current || accounts[0].Email != "solo@example.invalid" {
+		t.Fatalf("imported accounts = %#v", accounts)
+	}
+}
+
+func fakeGrokAuth(email string) string {
+	return `{"https://auth.x.ai::slot":{"email":"` + email + `"}}`
+}
+
+func TestDrawActionGridRendersThreeProviderColumns(t *testing.T) {
+	items := []menuItem{
+		{Type: "codex-resume", Label: "Codex resume picker"},
+		{Type: "claude-resume", Label: "Claude resume picker"},
+		{Type: "grok-resume", Label: "Grok resume picker"},
+		{Type: "codex-fresh", Label: "New Codex"},
+		{Type: "claude-fresh", Label: "New Claude"},
+		{Type: "grok-fresh", Label: "New Grok"},
+		{Type: "codex-accounts", Label: "Codex accounts"},
+		{Type: "claude-accounts", Label: "Claude accounts"},
+	}
+	output, err := captureStdout(t, func() error {
+		drawActionGrid(items, 0, 90)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 action rows, got %d: %q", len(lines), output)
+	}
+	if !strings.Contains(lines[0], "Codex resume picker") || !strings.Contains(lines[0], "Claude resume picker") || !strings.Contains(lines[0], "Grok resume picker") {
+		t.Fatalf("first row should be Codex | Claude | Grok resume: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "New Codex") || !strings.Contains(lines[1], "New Claude") || !strings.Contains(lines[1], "New Grok") {
+		t.Fatalf("second row should be New Codex | New Claude | New Grok: %q", lines[1])
+	}
+}
+
+func TestMoveSelectionRightUsesThreeColumns(t *testing.T) {
+	if got := moveSelectionRight(0, 8); got != 1 {
+		t.Fatalf("right from Codex resume = %d, want 1", got)
+	}
+	if got := moveSelectionRight(1, 8); got != 2 {
+		t.Fatalf("right from Claude resume = %d, want 2", got)
+	}
+	if got := moveSelectionRight(2, 8); got != 2 {
+		t.Fatalf("right from Grok resume should stay on last column, got %d", got)
+	}
+	if got := moveSelectionDown(0, 8, 0); got != 3 {
+		t.Fatalf("down from Codex resume = %d, want New Codex", got)
+	}
+}
+
 func TestRestartCodexSessionValidatesRootBeforeKilling(t *testing.T) {
 	const name = "restart-invalid-root"
 	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"

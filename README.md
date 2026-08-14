@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.15/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.16/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -56,6 +56,8 @@ agemux codex-accounts change 2
 agemux codex-accounts delete 2
 agemux claude-accounts
 agemux claude-accounts list
+agemux grok-accounts
+agemux grok-accounts list
 agemux list
 agemux attach NAME
 agemux detach NAME
@@ -74,6 +76,7 @@ agemux kill NAME
 - `G`: new Grok session (`grok --session-id` so it does not open the welcome picker)
 - `Enter` on `Codex accounts`: switch the active Codex CLI auth file or choose `+ Add Codex account`
 - `Enter` on `Claude accounts`: open the Claude account picker
+- `Enter` on `Grok accounts`: switch the active Grok CLI auth file or choose `+ Add Grok account`
 - `d`: detach the selected terminal while keeping its agent session running
 - `r`: restart the selected Codex or Grok session on its exact session UUID
 - `k`: kill selected persistent session after confirmation
@@ -156,6 +159,23 @@ agemux claude-accounts install-shim --force
 
 Without the shim, a plain `claude` command uses Claude Code's default config directory.
 
+Grok account switcher:
+
+```sh
+agemux grok-accounts
+agemux grok-accounts list
+agemux grok-accounts current
+agemux grok-accounts change 2
+agemux grok-accounts new
+agemux grok-accounts login 2
+agemux grok-accounts status 2
+agemux grok-accounts delete 2
+```
+
+`+ Add Grok account` starts `grok login` in an isolated temporary `GROK_HOME`, then saves the result as `~/.grok/auth.<name>.json` and switches the active `~/.grok/auth.json` to it. If only `auth.json` exists, the first list/import promotes it to a named slot.
+
+Inside the Grok account picker, use `Enter` to switch, `n` to add, `l` to login/update, `s` for status, and `d` to delete a local account slot.
+
 ## Requirements
 
 - `shpool` for `agemux`
@@ -170,7 +190,7 @@ Without the shim, a plain `claude` command uses Claude Code's default config dir
 
 Agent Multiplexer is a local terminal/session tool, not a hosted proxy, token broker, or quota aggregation service. It runs official local CLIs using local configuration that you control. Use it only with accounts and credentials you are authorized to operate, and follow the applicable provider terms and your organization policy.
 
-Agent Multiplexer does not store Claude, Codex, or Grok tokens in its own state files. It stores local config directory paths, cached account status, cached usage data, and persistent session metadata. Cached Claude usage data can include local Claude Code status fields such as session identifiers, model names, and context-window metadata. Codex account switching copies an existing local Codex auth file into Codex's active auth path; it does not log out, revoke tokens, or change provider-side limits.
+Agent Multiplexer does not store Claude, Codex, or Grok tokens in its own state files. It stores local config directory paths, cached account status, cached usage data, and persistent session metadata. Cached Claude usage data can include local Claude Code status fields such as session identifiers, model names, and context-window metadata. Codex and Grok account switching copy an existing local auth file into the CLI's active auth path; they do not log out, revoke tokens, or change provider-side limits.
 
 Agent sessions launched by `agemux` use the official CLI dangerous permission bypass flags by default:
 
