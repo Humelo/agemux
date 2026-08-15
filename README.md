@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.18/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.19/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.18/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.19/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.18/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.19/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.18/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.19/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -111,7 +111,7 @@ The control channel is a same-user Unix socket stored under `$XDG_RUNTIME_DIR/ag
 
 Sessions that are already attached in another terminal are not force-detached by default. Close the old terminal first, or use `agemux attach --force NAME` when you intentionally want to take over an attached session.
 
-If `shpool attach` exits while the session is still live and disconnected, agemux automatically reconnects up to three times with bounded backoff. The retry budget resets after a stable minute so isolated interruptions do not accumulate over a long-running terminal. agemux also resets bracketed paste, focus tracking, modify-other-keys, and the full Kitty keyboard-protocol stack at TUI and attachment boundaries so a crashed nested CLI does not leak escape sequences into the shell.
+If `shpool attach` exits while the session is still live and disconnected, agemux automatically reconnects up to three times with bounded backoff. The retry budget resets after a stable minute so isolated interruptions do not accumulate over a long-running terminal. agemux also resets bracketed paste, focus tracking, modify-other-keys, mouse tracking, and the full Kitty keyboard-protocol stack at TUI and attachment boundaries so a crashed nested CLI does not leak escape sequences into the shell. Grok attach restores the alternate screen and mouse modes before connecting, because shpool's screen restore replays cells only and a background-started Grok session will not re-emit those modes.
 
 `agemux restart NAME` and the interactive `r` key stop the selected Codex or Grok process and immediately resume the same session by UUID. The confirmation shows the internal agemux session name and verified session UUID so a changing display title cannot hide the target identity. This bypasses the slower resume picker and preserves the session root, title, model, and reasoning effort stored by agemux. Codex restarts also keep service tier and extra Codex config. Restart ignores open subagent rollout files and is limited to sessions whose exact session UUID can be verified before the old process is stopped. Grok session IDs are read from `~/.grok/active_sessions.json` for the live Grok process. Resume starts and restarts are serialized by UUID and refuse a session already owned by another live or starting agemux session. Sessions selected through the interactive picker are checked again as soon as their session UUID becomes observable; a duplicate picker session is closed instead of claiming the same session.
 

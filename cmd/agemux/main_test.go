@@ -63,6 +63,15 @@ func TestCodexKeyboardSetupDoesNotEnableFocusTracking(t *testing.T) {
 	}
 }
 
+func TestGrokClientSetupEnablesAlternateScreenBeforeAttach(t *testing.T) {
+	if !strings.Contains(terminalstate.GrokClientSetup, "\x1b[?1049h") {
+		t.Fatal("Grok attach setup must enter the alternate screen")
+	}
+	if !strings.Contains(terminalstate.GrokClientSetup, "\x1b[?1000h") {
+		t.Fatal("Grok attach setup must enable mouse tracking")
+	}
+}
+
 func TestConfirmConsumesKeyBufferedByPickerReader(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -836,6 +845,78 @@ func TestExecAttachStopsAfterThreeReconnectsAndResetsKeyboardEachTime(t *testing
 	}
 	if got := strings.Count(output, terminalstate.KeyboardResetSequence+terminalstate.CodexKeyboardSetup); got != 4 {
 		t.Fatalf("reset-before-setup count = %d, want 4", got)
+	}
+}
+
+func TestExecAttachEmitsGrokClientSetup(t *testing.T) {
+	dir := t.TempDir()
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-grok\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then exit 0; fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	if err := updateMeta("agemux-grok", map[string]any{"provider": "grok", "kind": "grok-resume"}); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return execAttach("agemux-grok", "", false)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, terminalstate.GrokClientSetup) {
+		t.Fatalf("Grok attach did not emit client setup: %q", output)
+	}
+	if strings.Contains(output, terminalstate.CodexKeyboardSetup) {
+		t.Fatalf("Grok attach emitted Codex keyboard setup: %q", output)
+	}
+}
+
+func TestExecAttachReemitsGrokClientSetupOnReconnect(t *testing.T) {
+	withoutAttachRetryDelay(t)
+	dir := t.TempDir()
+	attemptsFile := filepath.Join(dir, "attempts")
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then\n"+
+			"  printf '{\"sessions\":[{\"name\":\"agemux-grok\",\"status\":\"Disconnected\"}]}'\n"+
+			"  exit 0\n"+
+			"fi\n"+
+			"if [[ \"$1\" == \"attach\" ]]; then\n"+
+			"  printf x >> "+shellQuote(attemptsFile)+"\n"+
+			"  exit 1\n"+
+			"fi\n"+
+			"exit 2\n",
+	)
+	withShpoolBin(t, fake)
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	if err := updateMeta("agemux-grok", map[string]any{"provider": "grok", "kind": "grok-resume"}); err != nil {
+		t.Fatal(err)
+	}
+
+	output, attachErr := captureStdout(t, func() error {
+		return execAttach("agemux-grok", "", false)
+	})
+	if attachErr == nil {
+		t.Fatal("expected attach failure")
+	}
+	attempts, err := os.ReadFile(attemptsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(attempts) != "xxxx" {
+		t.Fatalf("attach attempts = %q, want initial attempt plus three reconnects", attempts)
+	}
+	if got := strings.Count(output, terminalstate.GrokClientSetup); got != 4 {
+		t.Fatalf("Grok client setup count = %d, want 4", got)
+	}
+	if strings.Contains(output, terminalstate.CodexKeyboardSetup) {
+		t.Fatalf("Grok reconnect emitted Codex keyboard setup: %q", output)
 	}
 }
 

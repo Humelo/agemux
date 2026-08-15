@@ -13,6 +13,11 @@ const (
 	// have pushed more than one entry, so a single CSI < u is not sufficient.
 	KeyboardResetSequence = "\033[?1004l\033[?2004l\033[>4;0m\033[<99u"
 	CodexKeyboardSetup    = "\033[?2004h\033[>4;0m\033[>7u"
+	// Match the DEC private modes Grok emits at TUI startup. shpool's
+	// default screen restore replays cells only, so a later attach must
+	// put the client into these modes itself.
+	GrokClientSetup    = "\033[?1049h\033[?1000h\033[?1002h\033[?1003h\033[?1015h\033[?1006h\033[?1004h\033[?2004h\033[?25l"
+	MouseResetSequence = "\033[?1000l\033[?1002l\033[?1003l\033[?1015l\033[?1006l"
 
 	enterScreenSequence = "\033[?25l\033[?1049h"
 	leaveScreenSequence = "\033[?1049l\033[?25h"
@@ -98,5 +103,6 @@ func Reset(output io.Writer) {
 
 func ResetAttachment(output io.Writer) {
 	_, _ = io.WriteString(output, leaveScreenSequence)
+	_, _ = io.WriteString(output, MouseResetSequence)
 	Reset(output)
 }

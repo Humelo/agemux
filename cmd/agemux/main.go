@@ -1104,6 +1104,10 @@ func emitCodexKeyboardSetup() {
 	fmt.Print(terminalstate.CodexKeyboardSetup)
 }
 
+func emitGrokClientSetup() {
+	fmt.Print(terminalstate.GrokClientSetup)
+}
+
 func emitCodexKeyboardReset() {
 	terminalstate.Reset(os.Stdout)
 }
@@ -1180,9 +1184,12 @@ func runAttachLoop(name, kind string, args []string) error {
 	defer terminalstate.ResetAttachment(os.Stdout)
 	reconnects := 0
 	for {
-		if provider == "codex" {
+		switch provider {
+		case "codex":
 			terminalstate.ResetAttachment(os.Stdout)
 			emitCodexKeyboardSetup()
+		case "grok":
+			emitGrokClientSetup()
 		}
 		attachedAt := time.Now()
 		err := runForeground(args)
@@ -2569,7 +2576,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.18")
+	req.Header.Set("User-Agent", "agemux/0.1.19")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

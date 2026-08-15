@@ -33,7 +33,45 @@ func TestResetWritesCompleteSequence(t *testing.T) {
 func TestResetAttachmentLeavesAlternateScreen(t *testing.T) {
 	var output bytes.Buffer
 	ResetAttachment(&output)
-	if got, want := output.String(), leaveScreenSequence+KeyboardResetSequence; got != want {
+	if got, want := output.String(), leaveScreenSequence+MouseResetSequence+KeyboardResetSequence; got != want {
 		t.Fatalf("attachment reset = %q, want %q", got, want)
+	}
+}
+
+func TestGrokClientSetupEnablesAlternateScreenAndMouse(t *testing.T) {
+	for _, sequence := range []string{
+		"\033[?1049h",
+		"\033[?1000h",
+		"\033[?1002h",
+		"\033[?1003h",
+		"\033[?1015h",
+		"\033[?1006h",
+		"\033[?1004h",
+		"\033[?2004h",
+		"\033[?25l",
+	} {
+		if !strings.Contains(GrokClientSetup, sequence) {
+			t.Fatalf("Grok attach setup is missing %q", sequence)
+		}
+	}
+	if strings.Contains(GrokClientSetup, "\033[?1049l") {
+		t.Fatal("Grok attach setup must not leave the alternate screen")
+	}
+}
+
+func TestResetAttachmentDisablesMouseTracking(t *testing.T) {
+	var output bytes.Buffer
+	ResetAttachment(&output)
+	got := output.String()
+	for _, sequence := range []string{
+		"\033[?1000l",
+		"\033[?1002l",
+		"\033[?1003l",
+		"\033[?1015l",
+		"\033[?1006l",
+	} {
+		if !strings.Contains(got, sequence) {
+			t.Fatalf("attachment reset is missing %q", sequence)
+		}
 	}
 }
