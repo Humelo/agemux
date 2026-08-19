@@ -1,6 +1,7 @@
 package claudeaccounts
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,26 @@ import (
 
 	"github.com/Humelo/agemux/internal/termkey"
 )
+
+func TestManagedClaudeShimKindOnlyInspectsHeader(t *testing.T) {
+	dir := t.TempDir()
+	headerShim := filepath.Join(dir, "header-shim")
+	if err := os.WriteFile(headerShim, []byte("#!/usr/bin/env bash\n# agemux managed Claude wrapper\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got := managedClaudeShimKind(headerShim); got != "agemux" {
+		t.Fatalf("header shim kind = %q, want agemux", got)
+	}
+
+	nonHeaderMarker := filepath.Join(dir, "large-binary")
+	content := append(bytes.Repeat([]byte{0}, managedClaudeShimProbeLimit), []byte("agemux managed Claude wrapper")...)
+	if err := os.WriteFile(nonHeaderMarker, content, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got := managedClaudeShimKind(nonHeaderMarker); got != "" {
+		t.Fatalf("marker beyond header returned kind %q", got)
+	}
+}
 
 func TestParseUsageText(t *testing.T) {
 	usage := parseUsageText(`Current session: 12.5% used · resets 3pm

@@ -38,6 +38,14 @@ func TestResetAttachmentLeavesAlternateScreen(t *testing.T) {
 	}
 }
 
+func TestPrepareAttachmentStartsOnFreshLine(t *testing.T) {
+	var output bytes.Buffer
+	PrepareAttachment(&output)
+	if got, want := output.String(), leaveScreenSequence+MouseResetSequence+KeyboardResetSequence+"\r\n"; got != want {
+		t.Fatalf("attachment preparation = %q, want %q", got, want)
+	}
+}
+
 func TestGrokClientSetupEnablesAlternateScreenAndMouse(t *testing.T) {
 	for _, sequence := range []string{
 		"\033[?1049h",

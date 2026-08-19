@@ -843,8 +843,8 @@ func TestExecAttachStopsAfterThreeReconnectsAndResetsKeyboardEachTime(t *testing
 	if got := strings.Count(output, terminalstate.CodexKeyboardSetup); got != 4 {
 		t.Fatalf("keyboard setup count = %d, want 4", got)
 	}
-	if got := strings.Count(output, terminalstate.KeyboardResetSequence+terminalstate.CodexKeyboardSetup); got != 4 {
-		t.Fatalf("reset-before-setup count = %d, want 4", got)
+	if got := strings.Count(output, terminalstate.KeyboardResetSequence+"\r\n"+terminalstate.CodexKeyboardSetup); got != 4 {
+		t.Fatalf("fresh-line reset-before-setup count = %d, want 4", got)
 	}
 }
 

@@ -28,7 +28,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.19"
+const version = "0.1.20"
 
 var (
 	home         = homeDir()
@@ -2080,8 +2080,15 @@ func isManagedClaudeShim(path string) bool {
 	return managedClaudeShimKind(path) != ""
 }
 
+const managedClaudeShimProbeLimit = 4 * 1024
+
 func managedClaudeShimKind(path string) string {
-	content, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, managedClaudeShimProbeLimit))
 	if err != nil {
 		return ""
 	}

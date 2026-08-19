@@ -1184,9 +1184,9 @@ func runAttachLoop(name, kind string, args []string) error {
 	defer terminalstate.ResetAttachment(os.Stdout)
 	reconnects := 0
 	for {
+		terminalstate.PrepareAttachment(os.Stdout)
 		switch provider {
 		case "codex":
-			terminalstate.ResetAttachment(os.Stdout)
 			emitCodexKeyboardSetup()
 		case "grok":
 			emitGrokClientSetup()
@@ -2576,7 +2576,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.19")
+	req.Header.Set("User-Agent", "agemux/0.1.20")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

@@ -106,3 +106,8 @@ func ResetAttachment(output io.Writer) {
 	_, _ = io.WriteString(output, MouseResetSequence)
 	Reset(output)
 }
+
+func PrepareAttachment(output io.Writer) {
+	ResetAttachment(output)
+	_, _ = io.WriteString(output, "\r\n")
+}
