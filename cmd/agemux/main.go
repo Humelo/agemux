@@ -65,6 +65,7 @@ var (
 	threadIDRE       = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	shpoolBin        = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
 	codexBin         = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
+	claudeBin        = resolveBinary("AGEMUX_CLAUDE_BIN", filepath.Join(homeDir(), ".local/bin/claude"), "claude")
 	grokBin          = resolveBinary("AGEMUX_GROK_BIN", filepath.Join(homeDir(), ".local/bin/grok"), "grok")
 	attachRetrySleep = time.Sleep
 	waitControlReady = waitForControlReady
@@ -956,7 +957,10 @@ func agentArgsWithMeta(kind, root string, row map[string]any) ([]string, error) 
 		}
 		return args, nil
 	case provider == "claude" && (mode == "resume" || mode == "fresh"):
-		args := []string{executablePath(), "claude-accounts", "run", "--"}
+		args := []string{claudeBin}
+		if !claudeUsesCallerProviderConfig() {
+			args = []string{executablePath(), "claude-accounts", "run", "--"}
+		}
 		if defaultDangerousEnv("AGEMUX_CLAUDE_DANGEROUS") {
 			args = append(args, "--dangerously-skip-permissions")
 		}
@@ -991,6 +995,20 @@ func agentArgsWithMeta(kind, root string, row map[string]any) ([]string, error) 
 	default:
 		return nil, fmt.Errorf("bad run kind: %q", kind)
 	}
+}
+
+func claudeUsesCallerProviderConfig() bool {
+	for _, key := range []string{
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC" + "_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func agentLabel(kind string) string {
@@ -1126,6 +1144,14 @@ func runCommand(name, kind, root string) string {
 		"AGEMUX_GROK_DANGEROUS",
 		"AGEMUX_PREFIX",
 		"AGEMUX_SHPOOL_BIN",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_MODEL",
+		"CLAUDE_CODE_OAUTH_SCOPES",
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR",
 		"CLSW_DATA_DIR",
 		"CODEX_HOME",
 		"GROK_HOME",
@@ -2576,7 +2602,7 @@ func fetchCodexUsage(client *http.Client, acc codexAccount) codexUsageSummary {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "agemux/0.1.20")
+	req.Header.Set("User-Agent", "agemux/0.1.21")
 	resp, err := client.Do(req)
 	if err != nil {
 		return codexUsageSummary{Error: "fetch-failed"}

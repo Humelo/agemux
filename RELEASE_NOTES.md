@@ -1,18 +1,20 @@
-# Agent Multiplexer v0.1.20
+# Agent Multiplexer v0.1.21
 
-Harden terminal attachment boundaries and reduce Claude account startup memory.
+Preserve caller-configured Claude provider environments in persistent sessions.
 
-- Foreground attachments now start on a fresh terminal line, preventing a restored Codex screen from being appended to the shell's `agemux` command text.
-- Managed Claude wrapper detection now reads only the 4 KiB script header instead of loading a large Claude executable into memory.
+- Claude sessions launched with a caller-supplied provider configuration (for example a custom base URL or API credential environment) now run the resolved local Claude CLI with that configuration intact.
+- Credentials remain in the normal Claude configuration or its configured helper and are never embedded in the shpool command line.
+- When no provider override is present, top-level Claude launches continue to use the selected agemux Claude account profile.
+- Added regression coverage for both launch modes and for provider-environment redaction.
 
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.20/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.21/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.20/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.21/scripts/install.sh | bash -s -- --with-codex-lb
 ```

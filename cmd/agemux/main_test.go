@@ -103,6 +103,18 @@ func TestRunCommandDoesNotWrapEnvWhenNoOverrides(t *testing.T) {
 		"AGEMUX_GROK_DANGEROUS",
 		"AGEMUX_PREFIX",
 		"AGEMUX_SHPOOL_BIN",
+		"ANTHROPIC" + "_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_CUSTOM_HEADERS",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_MODEL",
+		"CLAUDE_CODE_OAUTH_SCOPES",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR",
 		"CODEX_HOME",
 		"GROK_HOME",
 	} {
@@ -133,16 +145,68 @@ func TestRunCommandPreservesCodeHome(t *testing.T) {
 	}
 }
 
-func TestClaudeAgentArgsUseAccountRunner(t *testing.T) {
+func TestClaudeAgentArgsUseAccountRunnerWithoutProviderConfig(t *testing.T) {
+	for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC" + "_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		t.Setenv(key, "")
+	}
 	args, err := agentArgs("claude-resume", "/tmp/project")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(args) < 5 || args[1] != "claude-accounts" || args[2] != "run" || args[3] != "--" {
-		t.Fatalf("Claude args do not use account runner: %#v", args)
+	if len(args) < 4 || args[1] != "claude-accounts" || args[2] != "run" || args[3] != "--" {
+		t.Fatalf("Claude args do not use account runner without provider config: %#v", args)
 	}
 	if !containsArg(args, "--resume") {
 		t.Fatalf("Claude resume flag missing: %#v", args)
+	}
+}
+
+func TestClaudeAgentArgsUseResolvedClaudeBinaryWithProviderConfig(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.example.test")
+	args, err := agentArgs("claude-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) == 0 || args[0] != claudeBin {
+		t.Fatalf("Claude args do not use the resolved Claude binary: %#v", args)
+	}
+	if containsArg(args, "claude-accounts") {
+		t.Fatalf("provider-configured Claude launch must not force an account profile: %#v", args)
+	}
+	if !containsArg(args, "--resume") {
+		t.Fatalf("Claude resume flag missing: %#v", args)
+	}
+}
+
+func TestRunCommandPreservesClaudeProviderEnvironment(t *testing.T) {
+	for key, value := range map[string]string{
+		"ANTHROPIC_BASE_URL":              "https://gateway.example.test",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR": "/tmp/claude-creds",
+	} {
+		t.Setenv(key, value)
+	}
+
+	command := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	for _, want := range []string{
+		"ANTHROPIC_BASE_URL=https://gateway.example.test",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/tmp/claude-creds",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("Claude provider environment missing %q: %q", want, command)
+		}
+	}
+}
+
+func TestRunCommandDoesNotEmbedClaudeCredentials(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
+	t.Setenv("ANTHROPIC"+"_API_KEY", "test-api-key")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token")
+
+	command := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	for _, secret := range []string{"test-token", "test-api-key", "test-oauth-token"} {
+		if strings.Contains(command, secret) {
+			t.Fatalf("Claude credential was embedded in shpool command: %q", command)
+		}
 	}
 }
 
