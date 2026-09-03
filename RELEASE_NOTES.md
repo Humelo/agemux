@@ -1,7 +1,13 @@
-# Agent Multiplexer v0.1.22
+# Agent Multiplexer v0.1.23
 
-Harden Claude provider handoff for persistent sessions and non-interactive
-launches.
+Fix persistent session creation for all provider launch paths.
+
+- New Codex, Claude, and Grok sessions now pass their generated session name
+  to `shpool attach`, so the top-level commands and interactive picker no
+  longer fail with shpool's missing `<NAME>` argument error.
+- Added regression coverage for every provider create kind.
+
+This release also includes the Claude provider handoff hardening from v0.1.22.
 
 - Claude provider environments now survive the shpool daemon boundary through
   private runtime snapshots without embedding credential values in command
@@ -19,11 +25,11 @@ launches.
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.22/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.23/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.22/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.23/scripts/install.sh | bash -s -- --with-codex-lb
 ```
