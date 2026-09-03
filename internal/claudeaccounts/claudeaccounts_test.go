@@ -31,6 +31,75 @@ func TestManagedClaudeShimKindOnlyInspectsHeader(t *testing.T) {
 	}
 }
 
+func TestResolveClaudeBinBypassesManagedShim(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("managed shell shim test is POSIX-specific")
+	}
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "claude")
+	agemuxReal, _ := claudeRealNames()
+	realPath := filepath.Join(dir, agemuxReal)
+	if err := os.WriteFile(shimPath, []byte("#!/usr/bin/env bash\n# agemux managed Claude wrapper\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realPath, []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGEMUX_CLAUDE_BIN", shimPath)
+
+	if got := resolveClaudeBin(); got != realPath {
+		t.Fatalf("resolved Claude binary = %q, want real binary %q", got, realPath)
+	}
+}
+
+func TestResolveClaudeBinResolvesSymlinkedManagedShimTarget(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("managed shell shim test is POSIX-specific")
+	}
+	targetDir := t.TempDir()
+	linkDir := t.TempDir()
+	targetShim := filepath.Join(targetDir, "claude")
+	agemuxReal, _ := claudeRealNames()
+	realPath := filepath.Join(targetDir, agemuxReal)
+	symlinkPath := filepath.Join(linkDir, "claude")
+	if err := os.WriteFile(targetShim, []byte("#!/usr/bin/env bash\n# agemux managed Claude wrapper\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realPath, []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetShim, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGEMUX_CLAUDE_BIN", symlinkPath)
+
+	if got := resolveClaudeBin(); got != realPath {
+		t.Fatalf("resolved symlinked Claude binary = %q, want real binary %q", got, realPath)
+	}
+}
+
+func TestResolveClaudeBinResolvesBareCommandThroughPath(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("managed shell shim test is POSIX-specific")
+	}
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "claude")
+	agemuxReal, _ := claudeRealNames()
+	realPath := filepath.Join(dir, agemuxReal)
+	if err := os.WriteFile(shimPath, []byte("#!/usr/bin/env bash\n# agemux managed Claude wrapper\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realPath, []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGEMUX_CLAUDE_BIN", "claude")
+	t.Setenv("PATH", dir)
+
+	if got := resolveClaudeBin(); got != realPath {
+		t.Fatalf("resolved bare Claude command = %q, want real binary %q", got, realPath)
+	}
+}
+
 func TestParseUsageText(t *testing.T) {
 	usage := parseUsageText(`Current session: 12.5% used · resets 3pm
 Current week (all models): 40% used · resets Monday

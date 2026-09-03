@@ -241,6 +241,23 @@ func defaultClaudeAccountsDataDir() string {
 
 func resolveClaudeBin() string {
 	if value := envDefaultAny([]string{"AGEMUX_CLAUDE_BIN", "CLSW_CLAUDE_BIN"}, ""); value != "" {
+		if real := managedClaudeRealForShim(value); real != "" {
+			return real
+		}
+		if !filepath.IsAbs(value) {
+			if found, err := exec.LookPath(value); err == nil {
+				if real := managedClaudeRealForShim(found); real != "" {
+					return real
+				}
+				if absolute, err := filepath.Abs(found); err == nil {
+					return absolute
+				}
+				return found
+			}
+			if absolute, err := filepath.Abs(value); err == nil {
+				return absolute
+			}
+		}
 		return value
 	}
 	local := filepath.Join(homeDir(), ".local/bin/claude")
@@ -257,6 +274,14 @@ func resolveClaudeBin() string {
 		return found
 	}
 	return "claude"
+}
+
+// ResolveClaudeBin returns the real Claude executable when the configured
+// command is an agemux/clsw-managed shim. Callers that supply their own
+// provider environment must bypass that shim so it cannot replace the caller's
+// environment with a managed account profile.
+func ResolveClaudeBin() string {
+	return resolveClaudeBin()
 }
 
 func expandPath(path string) string {
@@ -2113,7 +2138,11 @@ func managedClaudeRealForShim(shimPath string) string {
 	if !isManagedClaudeShim(shimPath) {
 		return ""
 	}
-	binDir := filepath.Dir(shimPath)
+	resolvedShimPath, err := filepath.EvalSymlinks(shimPath)
+	if err != nil {
+		resolvedShimPath = shimPath
+	}
+	binDir := filepath.Dir(resolvedShimPath)
 	agemuxReal, legacyReal := claudeRealNames()
 	for _, name := range []string{agemuxReal, legacyReal} {
 		path := filepath.Join(binDir, name)

@@ -56,20 +56,24 @@ const (
 )
 
 var (
-	prefix           = envDefaultAny([]string{"AGEMUX_PREFIX", "AGENTMUX_PREFIX"}, "agemux")
-	dataDir          = expandPath(envDefault("AGEMUX_DATA_DIR", defaultDataDir()))
-	metaFile         = filepath.Join(dataDir, "sessions.json")
-	lockFile         = filepath.Join(dataDir, "sessions.lock")
-	titleRE          = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
-	nameRE           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
-	threadIDRE       = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	shpoolBin        = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
-	codexBin         = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
-	claudeBin        = resolveBinary("AGEMUX_CLAUDE_BIN", filepath.Join(homeDir(), ".local/bin/claude"), "claude")
-	grokBin          = resolveBinary("AGEMUX_GROK_BIN", filepath.Join(homeDir(), ".local/bin/grok"), "grok")
-	attachRetrySleep = time.Sleep
-	waitControlReady = waitForControlReady
-	discoverThreadID = discoverSessionThreadID
+	prefix                  = envDefaultAny([]string{"AGEMUX_PREFIX", "AGENTMUX_PREFIX"}, "agemux")
+	dataDir                 = expandPath(envDefault("AGEMUX_DATA_DIR", defaultDataDir()))
+	metaFile                = filepath.Join(dataDir, "sessions.json")
+	lockFile                = filepath.Join(dataDir, "sessions.lock")
+	titleRE                 = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
+	nameRE                  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
+	threadIDRE              = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	shpoolBin               = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
+	codexBin                = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
+	claudeBin               = claudeaccounts.ResolveClaudeBin()
+	grokBin                 = resolveBinary("AGEMUX_GROK_BIN", filepath.Join(homeDir(), ".local/bin/grok"), "grok")
+	attachRetrySleep        = time.Sleep
+	waitControlReady        = waitForControlReady
+	discoverThreadID        = discoverSessionThreadID
+	processExitCleanupMu    sync.Mutex
+	processExitCleanup      func()
+	claudePendingSnapshotMu sync.Mutex
+	claudePendingSnapshots  = map[string]struct{}{}
 )
 
 type controlRequest struct {
@@ -410,6 +414,8 @@ func installTerminalSignalCleanup() func() {
 			if term.IsTerminal(int(os.Stdout.Fd())) {
 				terminalstate.ResetAttachment(os.Stdout)
 			}
+			cleanupPendingClaudeProviderEnvSnapshots()
+			runProcessExitCleanup()
 			stop()
 			signal.Reset(received)
 			if unixSignal, ok := received.(syscall.Signal); ok {
@@ -420,6 +426,27 @@ func installTerminalSignalCleanup() func() {
 		}
 	}()
 	return stop
+}
+
+func setProcessExitCleanup(cleanup func()) func() {
+	processExitCleanupMu.Lock()
+	previous := processExitCleanup
+	processExitCleanup = cleanup
+	processExitCleanupMu.Unlock()
+	return func() {
+		processExitCleanupMu.Lock()
+		processExitCleanup = previous
+		processExitCleanupMu.Unlock()
+	}
+}
+
+func runProcessExitCleanup() {
+	processExitCleanupMu.Lock()
+	cleanup := processExitCleanup
+	processExitCleanupMu.Unlock()
+	if cleanup != nil {
+		cleanup()
+	}
 }
 
 func runMain(argv []string) error {
@@ -1018,7 +1045,16 @@ func claudeUsesCallerProviderConfig() bool {
 		"ANTHROPIC_BASE_URL",
 		"ANTHROPIC" + "_API_KEY",
 		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_CUSTOM_HEADERS",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_SMALL_FAST_MODEL",
+		"ANTHROPIC_MODEL",
 		"CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_CODE_OAUTH_SCOPES",
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR",
 	} {
 		if strings.TrimSpace(os.Getenv(key)) != "" {
 			return true
@@ -1146,7 +1182,7 @@ func emitCodexKeyboardReset() {
 	terminalstate.Reset(os.Stdout)
 }
 
-func runCommand(name, kind, root string) string {
+func runCommand(name, kind, root string) (string, string, error) {
 	envKeys := []string{
 		"AGEMUX_ALT_SCREEN",
 		"AGEMUX_CLAUDE_ACCOUNTS_DATA_DIR",
@@ -1172,24 +1208,239 @@ func runCommand(name, kind, root string) string {
 		"CODEX_HOME",
 		"GROK_HOME",
 	}
+	provider, _ := splitKind(kind)
 	var envArgs []string
 	hasEnv := false
+	snapshotPath := ""
 	for _, key := range envKeys {
+		if provider == "claude" && isClaudeProviderEnvKey(key) {
+			continue
+		}
 		if value, ok := os.LookupEnv(key); ok {
 			envArgs = append(envArgs, key+"="+value)
 			hasEnv = true
 		}
 	}
 	args := []string{executablePath(), "run", name, kind, root}
-	if provider, _ := splitKind(kind); provider == "claude" {
-		if envFile := claudeProviderEnvFile(); envFile != "" {
-			args = wrapClaudeProviderEnv(args, envFile)
+	if provider == "claude" {
+		wrappedProviderEnv := false
+		if explicit := strings.TrimSpace(os.Getenv("AGEMUX_CLAUDE_ENV_FILE")); explicit != "" {
+			envFile := claudeProviderEnvFile()
+			if envFile == "" {
+				return "", "", fmt.Errorf("Claude provider env file is missing or unreadable: %s", expandPath(explicit))
+			}
+			args = wrapClaudeProviderEnv(args, envFile, false)
+			wrappedProviderEnv = true
+		} else if claudeProviderEnvNeedsSnapshot() {
+			snapshot, err := writeClaudeProviderEnvSnapshot(name)
+			if err != nil {
+				return "", "", fmt.Errorf("prepare Claude provider environment: %w", err)
+			}
+			if snapshot != "" {
+				snapshotPath = snapshot
+				envArgs = append(envArgs, "AGEMUX_CLAUDE_ENV_SNAPSHOT="+snapshot)
+				hasEnv = true
+				args = wrapClaudeProviderEnv(args, snapshot, true)
+				wrappedProviderEnv = true
+			}
+		} else if envFile := claudeProviderEnvFile(); envFile != "" {
+			args = wrapClaudeProviderEnv(args, envFile, false)
+			wrappedProviderEnv = true
+		}
+		if !wrappedProviderEnv {
+			args = wrapClaudeProviderEnv(args, "", false)
 		}
 	}
 	if !hasEnv {
-		return shellJoin(args)
+		return shellJoin(args), snapshotPath, nil
 	}
-	return shellJoin(append(append([]string{"/usr/bin/env"}, envArgs...), args...))
+	return shellJoin(append(append([]string{"/usr/bin/env"}, envArgs...), args...)), snapshotPath, nil
+}
+
+var claudeProviderEnvKeys = map[string]struct{}{
+	"ANTHROPIC_BASE_URL":              {},
+	"ANTHROPIC" + "_API_KEY":          {},
+	"ANTHROPIC_AUTH_TOKEN":            {},
+	"ANTHROPIC_CUSTOM_HEADERS":        {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":    {},
+	"ANTHROPIC_DEFAULT_SONNET_MODEL":  {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":   {},
+	"ANTHROPIC_SMALL_FAST_MODEL":      {},
+	"ANTHROPIC_MODEL":                 {},
+	"CLAUDE_CODE_OAUTH_SCOPES":        {},
+	"CLAUDE_CODE_OAUTH_TOKEN":         {},
+	"CLAUDE_CONFIG_DIR":               {},
+	"CLAUDE_SECURESTORAGE_CONFIG_DIR": {},
+}
+
+func isClaudeProviderEnvKey(key string) bool {
+	_, ok := claudeProviderEnvKeys[key]
+	return ok
+}
+
+func claudeProviderEnvNeedsSnapshot() bool {
+	if !claudeUsesCallerProviderConfig() {
+		return false
+	}
+	for key := range claudeProviderEnvKeys {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeProviderEnvSnapshotDir() string {
+	if runtimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); runtimeDir != "" {
+		return filepath.Join(runtimeDir, "agemux")
+	}
+	return filepath.Join(homeDir(), ".local", "run", "agemux")
+}
+
+func ensureClaudeProviderEnvSnapshotDir() (string, error) {
+	dir := claudeProviderEnvSnapshotDir()
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return "", err
+	}
+	parentInfo, err := os.Stat(parent)
+	if err != nil || !parentInfo.IsDir() {
+		return "", fmt.Errorf("invalid Claude provider snapshot parent: %s", parent)
+	}
+	parentUID, ok := fileOwnerUID(parentInfo)
+	if !ok || parentUID != uint32(os.Getuid()) {
+		return "", fmt.Errorf("Claude provider snapshot parent is not owned by the current user: %s", parent)
+	}
+	if parentInfo.Mode().Perm()&0022 != 0 && parentInfo.Mode()&os.ModeSticky == 0 {
+		return "", fmt.Errorf("Claude provider snapshot parent is writable by other users: %s", parent)
+	}
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("invalid Claude provider snapshot directory: %s", dir)
+	}
+	dirUID, ok := fileOwnerUID(dirInfo)
+	if !ok || dirUID != uint32(os.Getuid()) {
+		return "", fmt.Errorf("Claude provider snapshot directory is not owned by the current user: %s", dir)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func fileOwnerUID(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
+}
+
+func writeClaudeProviderEnvSnapshot(sessionName string) (string, error) {
+	if !claudeProviderEnvNeedsSnapshot() {
+		return "", nil
+	}
+
+	dir, err := ensureClaudeProviderEnvSnapshotDir()
+	if err != nil {
+		return "", err
+	}
+	cleanupStaleClaudeProviderEnvSnapshots(dir)
+	var content strings.Builder
+	for key := range claudeProviderEnvKeys {
+		value, ok := os.LookupEnv(key)
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&content, "export %s=%s\n", key, shellJoin([]string{value}))
+	}
+	if content.Len() == 0 {
+		return "", nil
+	}
+	path := filepath.Join(dir, "agemux-claude-env-"+sessionName+".env")
+	registerPendingClaudeProviderEnvSnapshot(path)
+	if err := writeFileAtomic(path, []byte(content.String()), 0600); err != nil {
+		unregisterPendingClaudeProviderEnvSnapshot(path)
+		return "", err
+	}
+	return path, nil
+}
+
+const claudeProviderEnvSnapshotTTL = 24 * time.Hour
+
+func cleanupStaleClaudeProviderEnvSnapshots(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-claudeProviderEnvSnapshotTTL)
+	for _, entry := range entries {
+		if entry.IsDir() || !isClaudeProviderEnvSnapshotName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		removeClaudeProviderEnvSnapshot(filepath.Join(dir, entry.Name()))
+	}
+}
+
+func removeClaudeProviderEnvSnapshot(path string) {
+	if path == "" {
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	dir, err := filepath.Abs(claudeProviderEnvSnapshotDir())
+	if err != nil || filepath.Dir(abs) != dir || !isClaudeProviderEnvSnapshotName(filepath.Base(abs)) {
+		return
+	}
+	unregisterPendingClaudeProviderEnvSnapshot(abs)
+	_ = os.Remove(abs)
+}
+
+func registerPendingClaudeProviderEnvSnapshot(path string) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	claudePendingSnapshotMu.Lock()
+	claudePendingSnapshots[abs] = struct{}{}
+	claudePendingSnapshotMu.Unlock()
+}
+
+func unregisterPendingClaudeProviderEnvSnapshot(path string) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	claudePendingSnapshotMu.Lock()
+	delete(claudePendingSnapshots, abs)
+	claudePendingSnapshotMu.Unlock()
+}
+
+func cleanupPendingClaudeProviderEnvSnapshots() {
+	claudePendingSnapshotMu.Lock()
+	paths := make([]string, 0, len(claudePendingSnapshots))
+	for path := range claudePendingSnapshots {
+		paths = append(paths, path)
+	}
+	claudePendingSnapshots = map[string]struct{}{}
+	claudePendingSnapshotMu.Unlock()
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
+}
+
+func isClaudeProviderEnvSnapshotName(name string) bool {
+	return strings.HasPrefix(name, "agemux-claude-env-") || strings.HasPrefix(name, ".agemux-claude-env-")
 }
 
 // claudeProviderEnvFile returns the path to a caller-controlled provider env
@@ -1207,19 +1458,35 @@ func claudeProviderEnvFile() string {
 	} else {
 		configured = expandPath(configured)
 	}
+	if absolute, err := filepath.Abs(configured); err == nil {
+		configured = absolute
+	}
 	info, err := os.Stat(configured)
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
+	file, err := os.Open(configured)
+	if err != nil {
+		return ""
+	}
+	_ = file.Close()
 	return configured
 }
 
 // wrapClaudeProviderEnv keeps credential values out of the shpool command
 // string while allowing non-interactive agemux launches to use the same
 // provider env file as interactive shells.
-func wrapClaudeProviderEnv(args []string, envFile string) []string {
+func wrapClaudeProviderEnv(args []string, envFile string, removeAfterSource bool) []string {
 	quotedFile := shellJoin([]string{envFile})
-	script := fmt.Sprintf("if [ -r %s ]; then . %s; fi; exec %s", quotedFile, quotedFile, shellJoin(args))
+	cleanup := ""
+	if removeAfterSource {
+		cleanup = fmt.Sprintf("; rm -f -- %s", quotedFile)
+	}
+	clearProviderEnv := "unset ANTHROPIC_BASE_URL ANTHROPIC" + "_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_MODEL CLAUDE_CODE_OAUTH_SCOPES CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR CLAUDE_SECURESTORAGE_CONFIG_DIR 2>/dev/null || true; "
+	if envFile == "" {
+		return []string{"/bin/sh", "-lc", clearProviderEnv + "exec " + shellJoin(args)}
+	}
+	script := fmt.Sprintf("%sif [ ! -r %s ]; then echo 'agemux: Claude provider env file is unreadable' >&2; exit 78; fi; if ! /bin/sh -n %s; then echo 'agemux: Claude provider env file has invalid syntax' >&2; exit 78; fi; if ! . %s; then echo 'agemux: Claude provider env file could not be sourced' >&2; exit 78; fi%s; exec %s", clearProviderEnv, quotedFile, quotedFile, quotedFile, cleanup, shellJoin(args))
 	return []string{"/bin/sh", "-lc", script}
 }
 
@@ -1237,7 +1504,23 @@ func execAttach(name, createKind string, force bool) error {
 		if err := registerSession(name, createKind, root); err != nil {
 			return err
 		}
-		args = append(args, "--dir", root, "--cmd", runCommand(name, createKind, root))
+		command, snapshot, err := runCommand(name, createKind, root)
+		if err != nil {
+			_ = deleteSessionMeta(name)
+			return err
+		}
+		restoreSignalCleanup := setProcessExitCleanup(func() { removeClaudeProviderEnvSnapshot(snapshot) })
+		defer restoreSignalCleanup()
+		args = append(args, "--dir", root, "--cmd", command)
+		err = runAttachLoop(name, createKind, args)
+		removeClaudeProviderEnvSnapshot(snapshot)
+		if err != nil {
+			states, _ := liveSessionStates()
+			if _, live := states[name]; !live {
+				_ = deleteSessionMeta(name)
+			}
+		}
+		return err
 	} else {
 		states, err := liveSessionStates()
 		if err != nil {
@@ -1537,7 +1820,14 @@ func startNamedSessionPrepared(provider, name, absRoot, resumeID, model, effort,
 	if background {
 		args = append(args, "--background")
 	}
-	args = append(args, "--dir", absRoot, "--cmd", runCommand(name, kind, absRoot), "--", name)
+	command, snapshot, err := runCommand(name, kind, absRoot)
+	if err != nil {
+		_ = cleanupReservedStart(name, startToken)
+		return err
+	}
+	restoreSignalCleanup := setProcessExitCleanup(func() { removeClaudeProviderEnvSnapshot(snapshot) })
+	defer restoreSignalCleanup()
+	args = append(args, "--dir", absRoot, "--cmd", command, "--", name)
 	if background {
 		startTimeout := durationEnv("AGEMUX_START_TIMEOUT", defaultStartTimeout)
 		ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
@@ -1545,6 +1835,7 @@ func startNamedSessionPrepared(provider, name, absRoot, resumeID, model, effort,
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		out, runErr := cmd.CombinedOutput()
 		if runErr != nil {
+			removeClaudeProviderEnvSnapshot(snapshot)
 			_ = cleanupReservedStart(name, startToken)
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return fmt.Errorf("%s attach timed out after %s", shpoolBin, startTimeout)
@@ -1552,25 +1843,30 @@ func startNamedSessionPrepared(provider, name, absRoot, resumeID, model, effort,
 			return fmt.Errorf("%s attach failed: %s", shpoolBin, strings.TrimSpace(string(out)))
 		}
 		if readyErr := waitControlReady(name); readyErr != nil {
+			removeClaudeProviderEnvSnapshot(snapshot)
 			_ = cleanupReservedStart(name, startToken)
 			return readyErr
 		}
 		if err := finalizeReservedStart(name, startToken); err != nil {
+			removeClaudeProviderEnvSnapshot(snapshot)
 			_ = cleanupReservedStart(name, startToken)
 			return fmt.Errorf("finalize session metadata: %w", err)
 		}
 		if announce {
 			fmt.Printf("started %s\n", name)
 		}
+		removeClaudeProviderEnvSnapshot(snapshot)
 		return nil
 	}
 	if err := runAttachLoop(name, kind, args); err != nil {
+		removeClaudeProviderEnvSnapshot(snapshot)
 		states, _ := liveSessionStates()
 		if _, live := states[name]; !live {
 			_ = cleanupReservedStart(name, startToken)
 		}
 		return err
 	}
+	removeClaudeProviderEnvSnapshot(snapshot)
 	return nil
 }
 
@@ -4789,6 +5085,10 @@ func runAgentSession(name, kind, root string) error {
 	if err := ensureName(name); err != nil {
 		return err
 	}
+	snapshotPath := strings.TrimSpace(os.Getenv("AGEMUX_CLAUDE_ENV_SNAPSHOT"))
+	restoreSignalCleanup := setProcessExitCleanup(func() { removeClaudeProviderEnvSnapshot(snapshotPath) })
+	defer restoreSignalCleanup()
+	defer removeClaudeProviderEnvSnapshot(snapshotPath)
 	absRoot, err := filepath.Abs(expandPath(root))
 	if err == nil {
 		root = absRoot

@@ -110,6 +110,7 @@ func TestRunCommandDoesNotWrapEnvWhenNoOverrides(t *testing.T) {
 		"ANTHROPIC_DEFAULT_OPUS_MODEL",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_SMALL_FAST_MODEL",
 		"ANTHROPIC_MODEL",
 		"CLAUDE_CODE_OAUTH_SCOPES",
 		"CLAUDE_CODE_OAUTH_TOKEN",
@@ -127,7 +128,10 @@ func TestRunCommandDoesNotWrapEnvWhenNoOverrides(t *testing.T) {
 		})
 	}
 
-	command := runCommand("agemux-test", "codex-resume", "/tmp/project")
+	command, _, err := runCommand("agemux-test", "codex-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if command == "" {
 		t.Fatal("expected command")
 	}
@@ -139,7 +143,10 @@ func TestRunCommandDoesNotWrapEnvWhenNoOverrides(t *testing.T) {
 func TestRunCommandPreservesCodeHome(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/tmp/agemux-codex-home")
 
-	command := runCommand("agemux-test", "codex-resume", "/tmp/project")
+	command, _, err := runCommand("agemux-test", "codex-resume", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(command, "CODEX_HOME=/tmp/agemux-codex-home") {
 		t.Fatalf("CODEX_HOME was not preserved: %q", command)
 	}
@@ -180,30 +187,43 @@ func TestClaudeAgentArgsUseResolvedClaudeBinaryWithProviderConfig(t *testing.T) 
 
 func TestRunCommandPreservesClaudeProviderEnvironment(t *testing.T) {
 	for key, value := range map[string]string{
-		"ANTHROPIC_BASE_URL":              "https://gateway.example.test",
+		"ANTHROPIC_BASE_URL":              "https://user:secret@gateway.example.test",
 		"CLAUDE_SECURESTORAGE_CONFIG_DIR": "/tmp/claude-creds",
 	} {
 		t.Setenv(key, value)
 	}
 
-	command := runCommand("agemux-test", "claude-fresh", "/tmp/project")
-	for _, want := range []string{
-		"ANTHROPIC_BASE_URL=https://gateway.example.test",
-		"CLAUDE_SECURESTORAGE_CONFIG_DIR=/tmp/claude-creds",
-	} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("Claude provider environment missing %q: %q", want, command)
-		}
+	command, snapshot, err := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		removeClaudeProviderEnvSnapshot(snapshot)
+		removeClaudeProviderEnvSnapshot(filepath.Join(claudeProviderEnvSnapshotDir(), "agemux-claude-env-agemux-test.env"))
+	})
+	if strings.Contains(command, "user:secret") {
+		t.Fatalf("Claude provider URL credential was embedded in shpool command: %q", command)
+	}
+	if !strings.Contains(command, "AGEMUX_CLAUDE_ENV_SNAPSHOT=") {
+		t.Fatalf("Claude provider snapshot path missing from shpool command: %q", command)
 	}
 }
 
 func TestRunCommandDoesNotEmbedClaudeCredentials(t *testing.T) {
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
 	t.Setenv("ANTHROPIC"+"_API_KEY", "test-api-key")
+	t.Setenv("ANTHROPIC_CUSTOM_HEADERS", "test-header-secret")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token")
 
-	command := runCommand("agemux-test", "claude-fresh", "/tmp/project")
-	for _, secret := range []string{"test-token", "test-api-key", "test-oauth-token"} {
+	command, snapshot, err := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		removeClaudeProviderEnvSnapshot(snapshot)
+		removeClaudeProviderEnvSnapshot(filepath.Join(claudeProviderEnvSnapshotDir(), "agemux-claude-env-agemux-test.env"))
+	})
+	for _, secret := range []string{"test-token", "test-api-key", "test-header-secret", "test-oauth-token"} {
 		if strings.Contains(command, secret) {
 			t.Fatalf("Claude credential was embedded in shpool command: %q", command)
 		}
@@ -221,7 +241,10 @@ func TestRunCommandSourcesClaudeProviderEnvFileWithoutEmbeddingContents(t *testi
 	}
 	t.Setenv("AGEMUX_CLAUDE_ENV_FILE", envFile)
 
-	command := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	command, _, err := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(command, envFile) {
 		t.Fatalf("provider env file was not referenced: %q", command)
 	}
@@ -230,6 +253,120 @@ func TestRunCommandSourcesClaudeProviderEnvFileWithoutEmbeddingContents(t *testi
 	}
 	if !strings.Contains(command, "/bin/sh") || !strings.Contains(command, "-lc") {
 		t.Fatalf("provider env command was not wrapped by a shell loader: %q", command)
+	}
+}
+
+func TestRunCommandRejectsMissingExplicitClaudeProviderEnvFile(t *testing.T) {
+	t.Setenv("AGEMUX_CLAUDE_ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+	for _, key := range []string{
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC" + "_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_CUSTOM_HEADERS",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+	} {
+		t.Setenv(key, "")
+	}
+	command, snapshot, err := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	if err == nil {
+		t.Fatalf("expected missing explicit provider env file to fail, command=%q snapshot=%q", command, snapshot)
+	}
+	if command != "" || snapshot != "" {
+		t.Fatalf("failed launch returned command or snapshot: command=%q snapshot=%q", command, snapshot)
+	}
+}
+
+func TestClaudeProviderEnvFileResolvesRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "provider.env"), []byte("export ANTHROPIC_BASE_URL=https://gateway.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("AGEMUX_CLAUDE_ENV_FILE", "provider.env")
+
+	got := claudeProviderEnvFile()
+	want := filepath.Join(dir, "provider.env")
+	if got != want {
+		t.Fatalf("resolved provider env file = %q, want %q", got, want)
+	}
+}
+
+func TestWrapClaudeProviderEnvKeepsExplicitFile(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "claude-env-work.env")
+	args := wrapClaudeProviderEnv([]string{"agemux", "run", "name", "claude-fresh", "/tmp/project"}, envFile, false)
+	command := shellJoin(args)
+	if strings.Contains(command, "rm -f") {
+		t.Fatalf("explicit provider env file was marked for deletion: %q", command)
+	}
+	if !strings.Contains(command, "exit 78") {
+		t.Fatalf("provider env loader does not fail closed: %q", command)
+	}
+}
+
+func TestClaudeProviderEnvSnapshotDirectoryIsPrivate(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if err := os.Chmod(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	dir := filepath.Join(runtimeDir, "agemux")
+	if err := os.Mkdir(dir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ensureClaudeProviderEnvSnapshotDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dir {
+		t.Fatalf("snapshot dir = %q, want %q", got, dir)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0700 {
+		t.Fatalf("snapshot dir mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestClaudeProviderEnvSnapshotNamesIncludeAtomicTemps(t *testing.T) {
+	for _, name := range []string{"agemux-claude-env-session.env", ".agemux-claude-env-session.env.1.2.tmp"} {
+		if !isClaudeProviderEnvSnapshotName(name) {
+			t.Fatalf("snapshot name %q was not recognized", name)
+		}
+	}
+	if isClaudeProviderEnvSnapshotName("unrelated.env") {
+		t.Fatal("unrelated file was classified as a snapshot")
+	}
+}
+
+func TestClaudeProviderDetectionIncludesOverrides(t *testing.T) {
+	overrides := []string{
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC" + "_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_CUSTOM_HEADERS",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_MODEL",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_CODE_OAUTH_SCOPES",
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_SECURESTORAGE_CONFIG_DIR",
+	}
+	for _, key := range overrides {
+		for _, candidate := range overrides {
+			t.Setenv(candidate, "")
+		}
+		t.Setenv(key, "configured")
+		if !claudeUsesCallerProviderConfig() {
+			t.Fatalf("provider override %q was not detected", key)
+		}
 	}
 }
 

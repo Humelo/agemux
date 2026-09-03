@@ -192,6 +192,11 @@ a non-interactive automation shell), agemux sources the mode-600
 `AGEMUX_CLAUDE_ENV_FILE` to use a different provider env file. The file path,
 not its credential contents, is passed through the shpool command, so provider
 secrets are not embedded in session metadata or command lines.
+Loading that file is an intentional caller-provider override: top-level
+`agemux claude`/`claude-new` runs the real Claude binary and does not replace
+the provider with a selected `CLAUDE_CONFIG_DIR` account profile. Use
+`agemux claude-accounts run` when you explicitly want a managed account
+profile instead.
 
 ## Safety
 
