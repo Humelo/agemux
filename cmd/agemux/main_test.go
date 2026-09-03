@@ -790,6 +790,30 @@ func TestStartNamedCodexCreatesBackgroundSession(t *testing.T) {
 	}
 }
 
+func TestExecAttachCreatePassesSessionNameToShpool(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	argsFile := filepath.Join(dir, "args")
+	fake := fakeShpoolScript(t,
+		"printf '%s\\n' \"$*\" > "+shellQuote(argsFile)+"\n",
+	)
+	withShpoolBin(t, fake)
+
+	for _, kind := range []string{"codex-resume", "codex-fresh", "claude-resume", "claude-fresh", "grok-resume", "grok-fresh"} {
+		name := "agemux-create-" + kind
+		if err := execAttach(name, kind, false); err != nil {
+			t.Fatalf("execAttach(%q) failed: %v", kind, err)
+		}
+		called, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(called), "-- "+name) {
+			t.Fatalf("shpool attach for %s omitted session name %q: %q", kind, name, string(called))
+		}
+	}
+}
+
 func TestRegisteredNamedSessionIsOwnedWithoutPrefix(t *testing.T) {
 	dir := t.TempDir()
 	fake := fakeShpoolScript(t,

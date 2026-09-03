@@ -1511,7 +1511,7 @@ func execAttach(name, createKind string, force bool) error {
 		}
 		restoreSignalCleanup := setProcessExitCleanup(func() { removeClaudeProviderEnvSnapshot(snapshot) })
 		defer restoreSignalCleanup()
-		args = append(args, "--dir", root, "--cmd", command)
+		args = append(args, "--dir", root, "--cmd", command, "--", name)
 		err = runAttachLoop(name, createKind, args)
 		removeClaudeProviderEnvSnapshot(snapshot)
 		if err != nil {
