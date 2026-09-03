@@ -186,6 +186,13 @@ Inside the Grok account picker, use `Enter` to switch, `n` to add, `l` to login/
 
 `agemux` launches your local `codex`, `claude`, and `grok` commands. It does not bundle or proxy any provider's service.
 
+When a Claude launch does not inherit a provider environment (for example from
+a non-interactive automation shell), agemux sources the mode-600
+`~/.config/sub2api/claude.env` file when it exists. Set
+`AGEMUX_CLAUDE_ENV_FILE` to use a different provider env file. The file path,
+not its credential contents, is passed through the shpool command, so provider
+secrets are not embedded in session metadata or command lines.
+
 ## Safety
 
 Agent Multiplexer is a local terminal/session tool, not a hosted proxy, token broker, or quota aggregation service. It runs official local CLIs using local configuration that you control. Use it only with accounts and credentials you are authorized to operate, and follow the applicable provider terms and your organization policy.

@@ -432,17 +432,17 @@ func runMain(argv []string) error {
 	case cmd == "-h" || cmd == "--help" || cmd == "help":
 		usage(prog)
 	case cmd == "codex" || cmd == "new":
-		return create("codex-resume")
+		return runNoArgCommand(prog, argv, cmd, func() error { return create("codex-resume") })
 	case cmd == "codex-new" || cmd == "fresh":
-		return create("codex-fresh")
+		return runNoArgCommand(prog, argv, cmd, func() error { return create("codex-fresh") })
 	case cmd == "claude":
-		return create("claude-resume")
+		return runNoArgCommand(prog, argv, cmd, func() error { return create("claude-resume") })
 	case cmd == "claude-new":
-		return create("claude-fresh")
+		return runNoArgCommand(prog, argv, cmd, func() error { return create("claude-fresh") })
 	case cmd == "grok":
-		return create("grok-resume")
+		return runNoArgCommand(prog, argv, cmd, func() error { return create("grok-resume") })
 	case cmd == "grok-new":
-		return create("grok-fresh")
+		return runNoArgCommand(prog, argv, cmd, func() error { return create("grok-fresh") })
 	case cmd == "start":
 		return startCommand(argv[2:])
 	case cmd == "send":
@@ -474,6 +474,20 @@ func runMain(argv []string) error {
 		return fmt.Errorf("unknown command")
 	}
 	return nil
+}
+
+// runNoArgCommand prevents a typo such as `agemux claude-new --help` from
+// creating a live agent session. The provider commands intentionally accept no
+// positional options; use `agemux start` for named/background sessions.
+func runNoArgCommand(prog string, argv []string, command string, action func() error) error {
+	if len(argv) == 3 && (argv[2] == "-h" || argv[2] == "--help") {
+		usage(prog)
+		return nil
+	}
+	if len(argv) != 2 {
+		return fmt.Errorf("usage: %s %s", prog, command)
+	}
+	return action()
 }
 
 func usage(prog string) {
@@ -509,6 +523,8 @@ Codex, Claude, and Grok run with their dangerous permission bypass flags by defa
 Set AGEMUX_CODEX_DANGEROUS=0, AGEMUX_CLAUDE_DANGEROUS=0, or AGEMUX_GROK_DANGEROUS=0 to disable them.
 Set AGEMUX_ALT_SCREEN=1 to use Codex's alternate screen mode.
 Set AGEMUX_CODEX_BIN, AGEMUX_CLAUDE_BIN, AGEMUX_GROK_BIN, or AGEMUX_SHPOOL_BIN to override binary paths.
+Set AGEMUX_CLAUDE_ENV_FILE to override the Claude provider env file used for
+non-interactive launches (default: ~/.config/sub2api/claude.env when present).
 `, prog)
 }
 
@@ -1156,19 +1172,55 @@ func runCommand(name, kind, root string) string {
 		"CODEX_HOME",
 		"GROK_HOME",
 	}
-	var args []string
+	var envArgs []string
 	hasEnv := false
 	for _, key := range envKeys {
 		if value, ok := os.LookupEnv(key); ok {
-			args = append(args, key+"="+value)
+			envArgs = append(envArgs, key+"="+value)
 			hasEnv = true
 		}
 	}
-	args = append(args, executablePath(), "run", name, kind, root)
+	args := []string{executablePath(), "run", name, kind, root}
+	if provider, _ := splitKind(kind); provider == "claude" {
+		if envFile := claudeProviderEnvFile(); envFile != "" {
+			args = wrapClaudeProviderEnv(args, envFile)
+		}
+	}
 	if !hasEnv {
 		return shellJoin(args)
 	}
-	return shellJoin(append([]string{"/usr/bin/env"}, args...))
+	return shellJoin(append(append([]string{"/usr/bin/env"}, envArgs...), args...))
+}
+
+// claudeProviderEnvFile returns the path to a caller-controlled provider env
+// file without reading its contents into the shpool command line. An explicit
+// AGEMUX_CLAUDE_ENV_FILE takes precedence; otherwise the standard Humelo
+// Sub2API file is used only when the caller did not already provide a provider
+// environment. The child process sources the file at runtime.
+func claudeProviderEnvFile() string {
+	configured := strings.TrimSpace(os.Getenv("AGEMUX_CLAUDE_ENV_FILE"))
+	if configured == "" {
+		if claudeUsesCallerProviderConfig() {
+			return ""
+		}
+		configured = filepath.Join(homeDir(), ".config", "sub2api", "claude.env")
+	} else {
+		configured = expandPath(configured)
+	}
+	info, err := os.Stat(configured)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return configured
+}
+
+// wrapClaudeProviderEnv keeps credential values out of the shpool command
+// string while allowing non-interactive agemux launches to use the same
+// provider env file as interactive shells.
+func wrapClaudeProviderEnv(args []string, envFile string) []string {
+	quotedFile := shellJoin([]string{envFile})
+	script := fmt.Sprintf("if [ -r %s ]; then . %s; fi; exec %s", quotedFile, quotedFile, shellJoin(args))
+	return []string{"/bin/sh", "-lc", script}
 }
 
 func execAttach(name, createKind string, force bool) error {

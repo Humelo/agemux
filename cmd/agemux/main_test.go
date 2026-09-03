@@ -210,6 +210,43 @@ func TestRunCommandDoesNotEmbedClaudeCredentials(t *testing.T) {
 	}
 }
 
+func TestRunCommandSourcesClaudeProviderEnvFileWithoutEmbeddingContents(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "claude.env")
+	secret := "test-provider-secret"
+	if err := os.WriteFile(envFile, []byte("export ANTHROPIC_AUTH_TOKEN='"+secret+"'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC" + "_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("AGEMUX_CLAUDE_ENV_FILE", envFile)
+
+	command := runCommand("agemux-test", "claude-fresh", "/tmp/project")
+	if !strings.Contains(command, envFile) {
+		t.Fatalf("provider env file was not referenced: %q", command)
+	}
+	if strings.Contains(command, secret) {
+		t.Fatalf("provider credential was embedded in shpool command: %q", command)
+	}
+	if !strings.Contains(command, "/bin/sh") || !strings.Contains(command, "-lc") {
+		t.Fatalf("provider env command was not wrapped by a shell loader: %q", command)
+	}
+}
+
+func TestRunNoArgCommandRejectsUnexpectedArgs(t *testing.T) {
+	called := false
+	err := runNoArgCommand("agemux", []string{"agemux", "claude-new", "unexpected"}, "claude-new", func() error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected unexpected provider arguments to be rejected")
+	}
+	if called {
+		t.Fatal("provider action ran despite unexpected arguments")
+	}
+}
+
 func TestAgentArgsUseDangerousPermissionsByDefault(t *testing.T) {
 	t.Setenv("AGEMUX_CODEX_DANGEROUS", "")
 	t.Setenv("AGEMUX_CLAUDE_DANGEROUS", "")
