@@ -1983,6 +1983,20 @@ func deleteSessionMeta(name string) error {
 	})
 }
 
+// deleteSessionMetaIfOwned removes metadata only when it still belongs to the
+// runner/agent pair that just exited. A replacement session using the same
+// name must not have its metadata removed by an older runner's deferred cleanup.
+func deleteSessionMetaIfOwned(name string, runnerPID, agentPID int) error {
+	return withMetaLock(func(meta metadata) error {
+		row := meta[name]
+		if row == nil || int(int64Value(row["runner_pid"])) != runnerPID || int(int64Value(row["agent_pid"])) != agentPID {
+			return nil
+		}
+		delete(meta, name)
+		return saveMetaUnlocked(meta)
+	})
+}
+
 func waitForControlReady(name string) error {
 	timeout := durationEnv("AGEMUX_START_TIMEOUT", defaultStartTimeout)
 	deadline := time.Now().Add(timeout)
@@ -5162,6 +5176,11 @@ func runAgentSession(name, kind, root string) error {
 		"runner_pid": os.Getpid(),
 		"agent_pid":  cmd.Process.Pid,
 	})
+	runnerPID := os.Getpid()
+	agentPID := cmd.Process.Pid
+	defer func() {
+		_ = deleteSessionMetaIfOwned(name, runnerPID, agentPID)
+	}()
 	provider, _ := splitKind(kind)
 	if provider == "codex" || provider == "grok" {
 		onConflict := func(threadID string, owners []string) {

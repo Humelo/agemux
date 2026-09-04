@@ -928,6 +928,47 @@ func TestStartNamedCodexFailsWhenControlChannelNeverStarts(t *testing.T) {
 	}
 }
 
+func TestDeleteSessionMetaIfOwnedRemovesExitedSession(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, dir)
+	if err := updateMeta("grok-session", map[string]any{
+		"provider":   "grok",
+		"kind":       "grok-fresh",
+		"runner_pid": 101,
+		"agent_pid":  202,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteSessionMetaIfOwned("grok-session", 101, 202); err != nil {
+		t.Fatal(err)
+	}
+	if row := sessionMeta("grok-session"); len(row) != 0 {
+		t.Fatalf("exited session metadata remains: %#v", row)
+	}
+}
+
+func TestDeleteSessionMetaIfOwnedPreservesReplacementSession(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, dir)
+	if err := updateMeta("grok-session", map[string]any{
+		"provider":   "grok",
+		"kind":       "grok-fresh",
+		"runner_pid": 303,
+		"agent_pid":  404,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteSessionMetaIfOwned("grok-session", 101, 202); err != nil {
+		t.Fatal(err)
+	}
+	row := sessionMeta("grok-session")
+	if int64Value(row["runner_pid"]) != 303 || int64Value(row["agent_pid"]) != 404 {
+		t.Fatalf("replacement session metadata was removed or changed: %#v", row)
+	}
+}
+
 func TestShpoolSessionsTimesOut(t *testing.T) {
 	fake := fakeShpoolScript(t,
 		"if [[ \"$1 $2\" == \"list --json\" ]]; then exec sleep 2; fi\n"+
