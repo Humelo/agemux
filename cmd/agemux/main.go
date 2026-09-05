@@ -1987,6 +1987,17 @@ func deleteSessionMeta(name string) error {
 // runner/agent pair that just exited. A replacement session using the same
 // name must not have its metadata removed by an older runner's deferred cleanup.
 func deleteSessionMetaIfOwned(name string, runnerPID, agentPID int) error {
+	// Keep ownership metadata while shpool still has a stale entry. The explicit
+	// kill path uses it to repair disconnected sessions before retrying kill.
+	sessions, err := shpoolSessionsWithTimeout(500 * time.Millisecond)
+	if err != nil {
+		return nil
+	}
+	for _, session := range sessions {
+		if stringValue(session["name"]) == name {
+			return nil
+		}
+	}
 	return withMetaLock(func(meta metadata) error {
 		row := meta[name]
 		if row == nil || int(int64Value(row["runner_pid"])) != runnerPID || int(int64Value(row["agent_pid"])) != agentPID {
@@ -4618,9 +4629,14 @@ func tuiMenu() (string, string, error) {
 }
 
 func restartableSession(name string) bool {
-	provider, _ := splitKind(sessionKind(name))
+	meta := sessionMeta(name)
+	provider := stringValue(meta["provider"])
 	if provider == "" {
-		provider = stringValue(sessionMeta(name)["provider"])
+		kind := stringValue(meta["kind"])
+		if kind == "" {
+			return false
+		}
+		provider, _ = splitKind(kind)
 	}
 	return provider == "codex" || provider == "grok"
 }

@@ -931,6 +931,8 @@ func TestStartNamedCodexFailsWhenControlChannelNeverStarts(t *testing.T) {
 func TestDeleteSessionMetaIfOwnedRemovesExitedSession(t *testing.T) {
 	dir := t.TempDir()
 	withMetadataDir(t, dir)
+	fake := fakeShpoolScript(t, "if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n")
+	withShpoolBin(t, fake)
 	if err := updateMeta("grok-session", map[string]any{
 		"provider":   "grok",
 		"kind":       "grok-fresh",
@@ -951,6 +953,8 @@ func TestDeleteSessionMetaIfOwnedRemovesExitedSession(t *testing.T) {
 func TestDeleteSessionMetaIfOwnedPreservesReplacementSession(t *testing.T) {
 	dir := t.TempDir()
 	withMetadataDir(t, dir)
+	fake := fakeShpoolScript(t, "if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[]}'; exit 0; fi\n")
+	withShpoolBin(t, fake)
 	if err := updateMeta("grok-session", map[string]any{
 		"provider":   "grok",
 		"kind":       "grok-fresh",
@@ -966,6 +970,24 @@ func TestDeleteSessionMetaIfOwnedPreservesReplacementSession(t *testing.T) {
 	row := sessionMeta("grok-session")
 	if int64Value(row["runner_pid"]) != 303 || int64Value(row["agent_pid"]) != 404 {
 		t.Fatalf("replacement session metadata was removed or changed: %#v", row)
+	}
+}
+
+func TestDeleteSessionMetaIfOwnedPreservesStaleShpoolOwnership(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, filepath.Join(dir, "data"))
+	fake := fakeShpoolScript(t,
+		"if [[ \"$1 $2\" == \"list --json\" ]]; then printf '{\"sessions\":[{\"name\":\"custom-grok\",\"status\":\"Disconnected\"}]}'; exit 0; fi\n",
+	)
+	withShpoolBin(t, fake)
+	if err := updateMeta("custom-grok", map[string]any{"runner_pid": 101, "agent_pid": 202, "provider": "grok", "kind": "grok-resume"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteSessionMetaIfOwned("custom-grok", 101, 202); err != nil {
+		t.Fatal(err)
+	}
+	if row := sessionMeta("custom-grok"); len(row) == 0 {
+		t.Fatal("stale shpool ownership metadata was removed")
 	}
 }
 

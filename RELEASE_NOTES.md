@@ -1,4 +1,12 @@
-# Agent Multiplexer v0.1.23
+# Agent Multiplexer v0.1.24
+
+Fix Claude restart handling and stale agent-session metadata.
+
+- Claude sessions are no longer offered the Codex/Grok UUID restart action, which
+  previously failed after killing or re-entering the picker.
+- Exited agent runners remove only their own agemux metadata, so a replacement
+  session cannot be deleted by an older runner and finished sessions do not stay
+  in the picker.
 
 Fix persistent session creation for all provider launch paths.
 
@@ -25,11 +33,11 @@ This release also includes the Claude provider handoff hardening from v0.1.22.
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.23/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.24/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.23/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.24/scripts/install.sh | bash -s -- --with-codex-lb
 ```

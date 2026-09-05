@@ -1,7 +1,7 @@
 class Agemux < Formula
   desc "Persistent Codex, Claude, and Grok sessions with built-in account views"
   homepage "https://github.com/Humelo/agemux"
-  url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.23.tar.gz"
+  url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.24.tar.gz"
   sha256 "43917c1035bb175a2203776ed5b6b7d62712935badb7cca171bae05b83565f78"
   license "MIT"
 
@@ -14,6 +14,6 @@ class Agemux < Formula
 
   test do
     assert_match "agemux", shell_output("#{bin}/agemux --help")
-    assert_match "Claude accounts 0.1.23", shell_output("#{bin}/agemux claude-accounts version")
+    assert_match "Claude accounts 0.1.24", shell_output("#{bin}/agemux claude-accounts version")
   end
 end

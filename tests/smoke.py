@@ -68,8 +68,34 @@ def main():
             if proc.returncode == 0 or "requires POSIX PTY" not in proc.stderr:
                 raise SystemExit(f"Windows agemux non-help command should fail clearly: {proc.stdout!r} {proc.stderr!r}")
         proc = run([str(agemux_bin), "claude-accounts", "version"])
-        if "Claude accounts 0.1.23" not in proc.stdout:
+        if "Claude accounts 0.1.24" not in proc.stdout:
             raise SystemExit(f"unexpected Claude accounts version output: {proc.stdout!r}")
+
+        if os.name != "nt":
+            # Exercise the real PTY runner, with no provider requests or live shpool.
+            import json
+            for exit_code in (0, 7):
+                case = tmp / f"agent-exit-{exit_code}"
+                case.mkdir()
+                fake_agent = case / "grok"
+                fake_agent.write_text(f"#!/bin/sh\nprintf 'agent finished\\n'\nexit {exit_code}\n")
+                fake_agent.chmod(0o755)
+                fake_pool = case / "shpool"
+                fake_pool.write_text("#!/bin/sh\nprintf '{\"sessions\":[]}'\n")
+                fake_pool.chmod(0o755)
+                env = dict(os.environ, HOME=str(case), GROK_HOME=str(case),
+                           AGEMUX_DATA_DIR=str(case / "data"),
+                           AGEMUX_CONTROL_DIR=str(case / "control"),
+                           AGEMUX_GROK_BIN=str(fake_agent), AGEMUX_SHPOOL_BIN=str(fake_pool))
+                proc = subprocess.run([str(agemux_bin), "run", "grok-exit", "grok-fresh", str(case)],
+                                      env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, timeout=10)
+                if proc.returncode != exit_code or b"agent finished" not in proc.stdout:
+                    raise SystemExit(f"agent exit was not relayed: {proc.returncode} {proc.stderr!r}")
+                if "grok-exit" in json.loads((case / "data" / "sessions.json").read_text()):
+                    raise SystemExit("exited agent metadata remains")
+                if list((case / "control").glob("*.sock")):
+                    raise SystemExit("exited agent control socket remains")
 
         home = tmp / "home"
         bin_dir = tmp / "bin"
