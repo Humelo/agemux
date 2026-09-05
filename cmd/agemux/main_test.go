@@ -1493,6 +1493,29 @@ func TestRestartConfirmationPromptShowsSessionAndThread(t *testing.T) {
 	}
 }
 
+func TestRestartableSessionExcludesClaude(t *testing.T) {
+	dir := t.TempDir()
+	withMetadataDir(t, dir)
+	for name, provider := range map[string]string{
+		"codex-session":  "codex",
+		"grok-session":   "grok",
+		"claude-session": "claude",
+	} {
+		if err := updateMeta(name, map[string]any{
+			"provider": provider,
+			"kind":     provider + "-resume",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !restartableSession("codex-session") || !restartableSession("grok-session") {
+		t.Fatal("Codex and Grok sessions should remain restartable")
+	}
+	if restartableSession("claude-session") {
+		t.Fatal("Claude sessions must not enter the UUID restart path")
+	}
+}
+
 func TestRestartCodexSessionPreservesThreadAndLaunchSettings(t *testing.T) {
 	const name = "restart-preserves-settings"
 	threadID := "019f87ce" + "-e841-7b40-90da-" + "554c1ba9da6a"

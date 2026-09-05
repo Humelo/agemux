@@ -4601,7 +4601,7 @@ func tuiMenu() (string, string, error) {
 			}
 		case key == "r":
 			item := items[selected]
-			if item.Type == "session" && confirm(restartConfirmationPrompt(item), keys) {
+			if item.Type == "session" && restartableSession(item.Name) && confirm(restartConfirmationPrompt(item), keys) {
 				return "restart", item.Name, nil
 			}
 			dirty = true
@@ -4615,6 +4615,14 @@ func tuiMenu() (string, string, error) {
 			return "", "", nil
 		}
 	}
+}
+
+func restartableSession(name string) bool {
+	provider, _ := splitKind(sessionKind(name))
+	if provider == "" {
+		provider = stringValue(sessionMeta(name)["provider"])
+	}
+	return provider == "codex" || provider == "grok"
 }
 
 func restartConfirmationPrompt(item menuItem) string {
