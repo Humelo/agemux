@@ -4,7 +4,7 @@
   "homepage": "https://github.com/Humelo/agemux",
   "license": "MIT",
   "url": "https://github.com/Humelo/agemux/releases/download/v0.1.24/agemux_0.1.24_windows_amd64.zip",
-  "hash": "8ad154b1da8d8ebf399cea70c64c679820b33d8781878dd542ea64bf7ff9c076",
+  "hash": "bc0305adea89dbdbf445b19eb78ed0721b5e550517cc463f64548172ea92e69c",
   "bin": [
     [
       "agemux.exe",
