@@ -1,4 +1,8 @@
-# Agent Multiplexer v0.1.24
+# Agent Multiplexer v0.1.25
+
+This release adds headless named Claude sessions with `agemux start claude`.
+Use `--resume UUID` to resume a known Claude session; fresh starts use the
+same persistent background transport as Codex and Grok.
 
 Fix Claude restart handling and stale agent-session metadata.
 
@@ -33,11 +37,11 @@ This release also includes the Claude provider handoff hardening from v0.1.22.
 ## Install on Linux or macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.24/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash
 ```
 
 Opt in to companion `codex-lb` installation:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.24/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash -s -- --with-codex-lb
 ```
