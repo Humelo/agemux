@@ -2,7 +2,7 @@ class Agemux < Formula
   desc "Persistent Codex, Claude, and Grok sessions with built-in account views"
   homepage "https://github.com/Humelo/agemux"
   url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.25.tar.gz"
-  sha256 "2f1ce9645ea954c185127542cc675ff0eb24bcbb1e6ac41d3cd54eef919a089e"
+  sha256 "f4e6e234553fd226ceec6e13594d6c6a0aa064c5477687e4c879c48ecfa4080a"
   license "MIT"
 
   depends_on "go" => :build
