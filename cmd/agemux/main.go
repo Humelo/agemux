@@ -526,7 +526,7 @@ func usage(prog string) {
   %[1]s claude-new       new shpool session running fresh Claude
   %[1]s grok             new shpool session running Grok welcome/resume picker
   %[1]s grok-new         new shpool session running fresh Grok
-  %[1]s start {codex|grok} NAME [--resume UUID] [--background] [--root DIR]
+  %[1]s start {codex|grok|claude} NAME [--resume UUID] [--background] [--root DIR] [--title TITLE]
   %[1]s send NAME [TEXT]
   %[1]s send NAME --file PATH
   %[1]s capture NAME [--lines N]
@@ -1009,6 +1009,9 @@ func agentArgsWithMeta(kind, root string, row map[string]any) ([]string, error) 
 		}
 		if mode == "resume" {
 			args = append(args, "--resume")
+			if resumeID := stringValue(row["resume_id"]); resumeID != "" {
+				args = append(args, resumeID)
+			}
 		}
 		return args, nil
 	case provider == "grok" && (mode == "resume" || mode == "fresh"):
@@ -1676,8 +1679,8 @@ func create(kind string) error {
 }
 
 func startCommand(args []string) error {
-	if len(args) < 2 || (args[0] != "codex" && args[0] != "grok") {
-		return fmt.Errorf("usage: agemux start {codex|grok} NAME [--resume UUID] [--background] [--root DIR] [--model MODEL] [--effort LEVEL] [--service-tier TIER] [--config KEY=VALUE] [--title TITLE]")
+	if len(args) < 2 || (args[0] != "codex" && args[0] != "grok" && args[0] != "claude") {
+		return fmt.Errorf("usage: agemux start {codex|grok|claude} NAME [--resume UUID] [--background] [--root DIR] [--model MODEL] [--effort LEVEL] [--service-tier TIER] [--config KEY=VALUE] [--title TITLE]")
 	}
 	provider := args[0]
 	name := args[1]
@@ -1706,12 +1709,18 @@ func startCommand(args []string) error {
 			i++
 			root = expandPath(args[i])
 		case "--model":
+			if provider == "claude" {
+				return fmt.Errorf("--model is only supported for agemux start codex or grok")
+			}
 			if i+1 >= len(args) || args[i+1] == "" {
 				return fmt.Errorf("--model requires a value")
 			}
 			i++
 			model = args[i]
 		case "--effort":
+			if provider == "claude" {
+				return fmt.Errorf("--effort is only supported for agemux start codex or grok")
+			}
 			if i+1 >= len(args) || args[i+1] == "" {
 				return fmt.Errorf("--effort requires a value")
 			}
@@ -1764,7 +1773,7 @@ func startNamedSessionWithAnnouncement(provider, name, root, resumeID, model, ef
 	if err := ensureName(name); err != nil {
 		return err
 	}
-	if provider != "codex" && provider != "grok" {
+	if provider != "codex" && provider != "grok" && provider != "claude" {
 		return fmt.Errorf("unsupported start provider: %s", provider)
 	}
 	absRoot, err := filepath.Abs(root)

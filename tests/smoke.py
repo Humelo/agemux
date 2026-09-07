@@ -54,7 +54,7 @@ def main():
         help_proc = run([str(agemux_bin), "--help"])
         needles = ["agemux grok", "agemux grok-new", "grok-accounts"]
         if os.name != "nt":
-            needles.append("g, G")
+            needles.extend(["g, G", "start {codex|grok|claude}"])
         for needle in needles:
             if needle not in help_proc.stdout:
                 raise SystemExit(f"help missing {needle!r}: {help_proc.stdout!r}")
@@ -68,7 +68,7 @@ def main():
             if proc.returncode == 0 or "requires POSIX PTY" not in proc.stderr:
                 raise SystemExit(f"Windows agemux non-help command should fail clearly: {proc.stdout!r} {proc.stderr!r}")
         proc = run([str(agemux_bin), "claude-accounts", "version"])
-        if "Claude accounts 0.1.24" not in proc.stdout:
+        if "Claude accounts 0.1.25" not in proc.stdout:
             raise SystemExit(f"unexpected Claude accounts version output: {proc.stdout!r}")
 
         if os.name != "nt":
@@ -123,6 +123,46 @@ def main():
             proc = run([str(agemux_bin), "list"], env=env_agemux)
             if "agemux-20260706-010203-123-aaaa" not in proc.stdout:
                 raise SystemExit(f"agemux list did not include fake shpool session: {proc.stdout!r}")
+
+            # Exercise named Claude startup without touching a real daemon/provider.
+            import hashlib
+            import socket
+            import threading
+            control_dir = tmp / "control"
+            control_dir.mkdir()
+            session = "smoke-claude"
+            socket_path = control_dir / (hashlib.sha256(session.encode()).hexdigest()[:24] + ".sock")
+            fake_shpool.write_text(
+                '#!/usr/bin/env bash\n'
+                'if [[ "$1 $2" == "list --json" ]]; then printf \'{"sessions":[]}\'; exit 0; fi\n'
+                '[[ "$1 $2" == "attach --background" && "$*" == *claude-fresh* ]] || exit 2\n'
+                'printf "%s\\n" "$*" > "$HOME/attach-args"\n'
+            )
+            with socket.socket(socket.AF_UNIX) as server:
+                server.bind(str(socket_path))
+                server.listen()
+                server.settimeout(5)
+                def ready_control():
+                    # Startup verifies the control channel twice.
+                    for _ in range(2):
+                        with server.accept()[0] as conn:
+                            with conn.makefile("r") as stream:
+                                request = json.loads(stream.readline())
+                            assert request["op"] == "capture"
+                            conn.sendall(b'{"ok":true,"output":"ready"}\n')
+                ready = threading.Thread(target=ready_control)
+                ready.start()
+                try:
+                    proc = run([str(agemux_bin), "start", "claude", session, "--background",
+                                "--root", str(home), "--title", "Claude smoke"],
+                               env={**env_agemux, "AGEMUX_CONTROL_DIR": str(control_dir)})
+                finally:
+                    ready.join(timeout=6)
+            row = json.loads((agemux_data / "sessions.json").read_text())[session]
+            assert row["provider"] == "claude" and row["kind"] == "claude-fresh", row
+            assert row["title"] == "Claude smoke" and row["root"] == str(home), row
+            assert "-- " + session in (home / "attach-args").read_text()
+            assert "started " + session in proc.stdout
 
         (home / ".claude").mkdir()
         (home / ".claude" / "settings.json").write_text("{}\n")
