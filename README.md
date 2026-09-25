@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -239,3 +239,11 @@ Build local binaries:
 ```sh
 go build -o dist/agemux ./cmd/agemux
 ```
+
+### Non-interactive dependency discovery
+
+SSH commands and service launches may have a reduced `PATH`. Agemux first honors
+`AGEMUX_SHPOOL_BIN` and an executable `shpool` on `PATH`, then checks next to its
+own executable, `~/.local/bin/shpool`, and `~/.cargo/bin/shpool`. Directory and
+non-executable candidates are ignored. This applies equally to listing, starting
+and attaching to persistent sessions; no shell startup file needs to be changed.

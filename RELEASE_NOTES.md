@@ -1,47 +1,10 @@
-# Agent Multiplexer v0.1.25
+# Agent Multiplexer v0.1.26
 
-This release adds headless named Claude sessions with `agemux start claude`.
-Use `--resume UUID` to resume a known Claude session; fresh starts use the
-same persistent background transport as Codex and Grok.
+Fix dependency discovery for non-interactive SSH and service invocations.
 
-Fix Claude restart handling and stale agent-session metadata.
+- Preserve explicit `AGEMUX_SHPOOL_BIN` and `PATH` precedence.
+- Discover an installed shpool next to agemux or in the standard user bin directories when the caller has a minimal PATH.
+- Reject directory and non-executable fallback candidates.
+- Cover lookup, override precedence and invocation with a deliberately restricted PATH.
 
-- Claude sessions are no longer offered the Codex/Grok UUID restart action, which
-  previously failed after killing or re-entering the picker.
-- Exited agent runners remove only their own agemux metadata, so a replacement
-  session cannot be deleted by an older runner and finished sessions do not stay
-  in the picker.
-
-Fix persistent session creation for all provider launch paths.
-
-- New Codex, Claude, and Grok sessions now pass their generated session name
-  to `shpool attach`, so the top-level commands and interactive picker no
-  longer fail with shpool's missing `<NAME>` argument error.
-- Added regression coverage for every provider create kind.
-
-This release also includes the Claude provider handoff hardening from v0.1.22.
-
-- Claude provider environments now survive the shpool daemon boundary through
-  private runtime snapshots without embedding credential values in command
-  lines or session metadata.
-- Explicit/default env files fail closed when missing, unreadable, invalid, or
-  unsafe; stale daemon provider variables are cleared before launch.
-- Managed agemux/clsw Claude shims are resolved to the real Claude binary when
-  caller provider configuration is active, including symlinked and PATH-based
-  commands.
-- `agemux claude-new --help` and other bare provider help/argument paths no
-  longer create unintended sessions.
-- Added regression coverage for provider snapshots, cleanup, directory
-  permissions, argument validation, and managed-shim resolution.
-
-## Install on Linux or macOS
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash
-```
-
-Opt in to companion `codex-lb` installation:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.25/scripts/install.sh | bash -s -- --with-codex-lb
-```
+Existing persistent sessions and the shpool daemon are unchanged.

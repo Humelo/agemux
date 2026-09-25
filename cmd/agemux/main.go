@@ -63,7 +63,7 @@ var (
 	titleRE                 = regexp.MustCompile(`\x1b\](?:0|2);([^\x07\x1b]*)(?:\x07|\x1b\\)`)
 	nameRE                  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$`)
 	threadIDRE              = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	shpoolBin               = resolveBinary("AGEMUX_SHPOOL_BIN", "", "shpool")
+	shpoolBin               = resolveShpoolBinary()
 	codexBin                = resolveBinary("AGEMUX_CODEX_BIN", filepath.Join(homeDir(), ".local/bin/codex"), "codex")
 	claudeBin               = claudeaccounts.ResolveClaudeBin()
 	grokBin                 = resolveBinary("AGEMUX_GROK_BIN", filepath.Join(homeDir(), ".local/bin/grok"), "grok")
@@ -613,6 +613,32 @@ func resolveBinary(envName, defaultPath, fallback string) string {
 		return found
 	}
 	return fallback
+}
+
+// Non-interactive SSH and service invocations often omit user installation bins.
+// Explicit configuration and PATH still take precedence over fallback locations.
+func resolveShpoolBinary() string {
+	locations := []string{}
+	if executable, err := os.Executable(); err == nil {
+		locations = append(locations, filepath.Join(filepath.Dir(executable), "shpool"))
+	}
+	locations = append(locations, filepath.Join(homeDir(), ".local/bin/shpool"), filepath.Join(homeDir(), ".cargo/bin/shpool"))
+	return resolveShpoolWithFallbacks(locations)
+}
+
+func resolveShpoolWithFallbacks(locations []string) string {
+	if value := os.Getenv("AGEMUX_SHPOOL_BIN"); value != "" {
+		return value
+	}
+	if found, err := exec.LookPath("shpool"); err == nil {
+		return found
+	}
+	for _, candidate := range locations {
+		if st, err := os.Stat(candidate); err == nil && st.Mode().IsRegular() && st.Mode()&0111 != 0 {
+			return candidate
+		}
+	}
+	return "shpool"
 }
 
 func truthyEnv(name string) bool {
