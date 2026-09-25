@@ -47,6 +47,11 @@ func TestResolveClaudeBinBypassesManagedShim(t *testing.T) {
 	}
 	t.Setenv("AGEMUX_CLAUDE_BIN", shimPath)
 
+	// macOS exposes the temporary root through /var -> /private/var.
+	realPath, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := resolveClaudeBin(); got != realPath {
 		t.Fatalf("resolved Claude binary = %q, want real binary %q", got, realPath)
 	}
@@ -73,6 +78,11 @@ func TestResolveClaudeBinResolvesSymlinkedManagedShimTarget(t *testing.T) {
 	}
 	t.Setenv("AGEMUX_CLAUDE_BIN", symlinkPath)
 
+	// macOS exposes the temporary root through /var -> /private/var.
+	realPath, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := resolveClaudeBin(); got != realPath {
 		t.Fatalf("resolved symlinked Claude binary = %q, want real binary %q", got, realPath)
 	}
@@ -95,6 +105,11 @@ func TestResolveClaudeBinResolvesBareCommandThroughPath(t *testing.T) {
 	t.Setenv("AGEMUX_CLAUDE_BIN", "claude")
 	t.Setenv("PATH", dir)
 
+	// macOS exposes the temporary root through /var -> /private/var.
+	realPath, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := resolveClaudeBin(); got != realPath {
 		t.Fatalf("resolved bare Claude command = %q, want real binary %q", got, realPath)
 	}
