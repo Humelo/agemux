@@ -3,6 +3,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -45,8 +46,9 @@ def main():
     run([go, "test", "./..."], cwd=ROOT)
     cross_build_matrix(go)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = pathlib.Path(tmp)
+    # Darwin AF_UNIX paths are limited to 104 bytes; keep socket fixtures short.
+    with tempfile.TemporaryDirectory(prefix="agx-", dir="/tmp" if sys.platform == "darwin" else None) as tmp:
+        tmp = pathlib.Path(tmp).resolve()
         build = tmp / "build"
         build.mkdir()
         agemux_bin = build / ("agemux.exe" if os.name == "nt" else "agemux")
