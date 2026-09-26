@@ -77,16 +77,18 @@ var (
 )
 
 type controlRequest struct {
-	Op     string `json:"op"`
-	Text   string `json:"text,omitempty"`
-	Submit bool   `json:"submit,omitempty"`
-	Lines  int    `json:"lines,omitempty"`
+	Op     string   `json:"op"`
+	Text   string   `json:"text,omitempty"`
+	Submit bool     `json:"submit,omitempty"`
+	Lines  int      `json:"lines,omitempty"`
+	Keys   []string `json:"keys,omitempty"`
 }
 
 type controlResponse struct {
-	OK     bool   `json:"ok"`
-	Error  string `json:"error,omitempty"`
-	Output string `json:"output,omitempty"`
+	OK           bool     `json:"ok"`
+	Error        string   `json:"error,omitempty"`
+	Output       string   `json:"output,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type lockedWriter struct {
@@ -476,6 +478,15 @@ func runMain(argv []string) error {
 		return sendCommand(argv[2:])
 	case cmd == "capture":
 		return captureCommand(argv[2:])
+	case cmd == "keys" && len(argv) >= 4:
+		_, err := controlCall(argv[2], controlRequest{Op: "keys", Keys: argv[3:]})
+		return err
+	case cmd == "control-info" && len(argv) == 3:
+		response, err := controlCall(argv[2], controlRequest{Op: "info"})
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(response)
 	case cmd == "codex-accounts":
 		return codexAccountsCommand(argv[2:])
 	case cmd == "claude-accounts":
@@ -530,6 +541,8 @@ func usage(prog string) {
   %[1]s send NAME [TEXT]
   %[1]s send NAME --file PATH
   %[1]s capture NAME [--lines N]
+  %[1]s control-info NAME  inspect runner control capabilities
+  %[1]s keys NAME KEY...   send named selection keys without pasting text
   %[1]s codex-accounts   open the Codex account switcher
   %[1]s codex-accounts new [name]
   %[1]s codex-accounts change SELECTOR
@@ -5120,6 +5133,38 @@ func handleControlConnection(conn net.Conn, input io.Writer, output *outputBuffe
 	}
 	response := controlResponse{OK: true}
 	switch request.Op {
+	case "info":
+		response.Capabilities = []string{"send", "capture", "keys"}
+	case "keys":
+		allowed := map[string]string{"up": "\033[A", "down": "\033[B", "left": "\033[D", "right": "\033[C", "enter": "\r", "escape": "\033", "tab": "\t", "s": "s", "backspace": "\177"}
+		if len(request.Keys) == 0 || len(request.Keys) > 64 {
+			response.OK = false
+			response.Error = "keys requires between 1 and 64 named keys"
+			break
+		}
+		var payload []byte
+		for _, key := range request.Keys {
+			value, ok := allowed[key]
+			if !ok {
+				response.OK = false
+				response.Error = "unsupported named key"
+				break
+			}
+			payload = append(payload, []byte(value)...)
+		}
+		if !response.OK {
+			break
+		}
+		var err error
+		if writer, ok := input.(queuedWriter); ok {
+			err = writer.EnqueueTimeout(payload, timeout/2)
+		} else {
+			_, err = input.Write(payload)
+		}
+		if err != nil {
+			response.OK = false
+			response.Error = err.Error()
+		}
 	case "send":
 		if request.Text == "" {
 			response.OK = false

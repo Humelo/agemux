@@ -691,6 +691,26 @@ func TestControlChannelSendsAndCaptures(t *testing.T) {
 	if response.Output != "second\nthird" {
 		t.Fatalf("capture output = %q", response.Output)
 	}
+	infoResponse, err := controlCall("agemux-control-test", controlRequest{Op: "info"})
+	if err != nil || strings.Join(infoResponse.Capabilities, ",") != "send,capture,keys" {
+		t.Fatalf("control capabilities: %#v %v", infoResponse, err)
+	}
+	before := input.String()
+	if _, err := controlCall("agemux-control-test", controlRequest{Op: "keys", Keys: []string{"down", "enter", "s"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := input.String(); got != before+"\033[B\rs" {
+		t.Fatalf("named keys must not become a pasted prompt: %q", got)
+	}
+	before = input.String()
+	for _, keys := range [][]string{nil, {"down", "arbitrary-text"}, make([]string, 65)} {
+		if _, err := controlCall("agemux-control-test", controlRequest{Op: "keys", Keys: keys}); err == nil {
+			t.Fatalf("invalid keys accepted: %#v", keys)
+		}
+		if input.String() != before {
+			t.Fatal("invalid batch partially wrote input")
+		}
+	}
 	if info, err := os.Stat(controlSocketPath("agemux-control-test")); err != nil {
 		t.Fatal(err)
 	} else if info.Mode().Perm() != 0600 {

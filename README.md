@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.27/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.27/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.27/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.26/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.27/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -108,6 +108,26 @@ agemux capture nightly-review --lines 200
 ```
 
 The control channel is a same-user Unix socket stored under `$XDG_RUNTIME_DIR/agemux` or `~/.local/run/agemux`, with directory mode `0700` and socket mode `0600`. Treat access to the local account as permission to control these agent sessions.
+
+### Selection keys and capability discovery
+
+New runners support named keys for native CLI menus without wrapping those keys in
+bracketed paste. This keeps a menu action separate from submitting a prompt.
+
+```sh
+agemux control-info my-session
+agemux keys my-session down enter
+```
+
+Supported keys are `up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `s`, and
+`backspace`. The `s` key is useful for CLIs whose menu offers a session-only choice.
+Requests contain between 1 and 64 keys; the entire batch is validated before any
+input is written. Socket clients can use `{"op":"info"}` and
+`{"op":"keys","keys":["down","enter"]}`. Existing `send` and `capture` operations
+retain their behavior. Clients should check capabilities before using keys.
+
+An installed binary update applies to newly started/resumed runners. Running sessions
+keep their existing runner and are not restarted automatically.
 
 Sessions that are already attached in another terminal are not force-detached by default. Close the old terminal first, or use `agemux attach --force NAME` when you intentionally want to take over an attached session.
 
