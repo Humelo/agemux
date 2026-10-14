@@ -1,4 +1,18 @@
-# Agent Multiplexer v0.1.27
+# Agent Multiplexer v0.1.28
+
+Track the exact Codex thread when the TUI uses a shared local background server.
+
+- Give each new Codex runner a private Unix transport and observe successful
+  root-thread start, resume and fork responses from that runner alone.
+- Stream conversation traffic unchanged with bounded identity inspection; never
+  identify a thread by its title, the newest file, or a shared daemon file handle.
+- Preserve per-session configuration and existing ownership checks. Older CLIs
+  keep direct file-descriptor tracking. Set `AGEMUX_CODEX_DAEMON_TRACKING=0` to
+  retain the legacy transport explicitly.
+- Releasing or installing agemux does not restart shpool, Codex, or existing
+  runners. New tracking applies when a runner is next started.
+
+## v0.1.27
 
 Add named selection-key control and runner capability discovery for integrations.
 

@@ -1232,6 +1232,7 @@ func runCommand(name, kind, root string) (string, string, error) {
 		"AGEMUX_CLAUDE_DANGEROUS",
 		"AGEMUX_CODEX_BIN",
 		"AGEMUX_CODEX_DANGEROUS",
+		"AGEMUX_CODEX_DAEMON_TRACKING",
 		"AGEMUX_CONTROL_DIR",
 		"AGEMUX_DATA_DIR",
 		"AGEMUX_GROK_BIN",
@@ -5223,6 +5224,20 @@ func runAgentSession(name, kind, root string) error {
 	if err != nil {
 		return err
 	}
+	var codexDaemon *codexDaemonBridge
+	if provider, _ := splitKind(kind); provider == "codex" {
+		codexDaemon, err = prepareCodexDaemonBridge(root, stringSliceValue(configured["codex_config"]))
+		if err != nil {
+			return err
+		}
+		if codexDaemon != nil {
+			defer codexDaemon.stop()
+			args, err = codexDaemon.launchArgs(args)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	if err := registerSession(name, kind, root); err != nil {
 		return err
 	}
@@ -5302,7 +5317,11 @@ func runAgentSession(name, kind, root string) error {
 			cancel()
 		}
 		if provider == "codex" {
-			go trackCodexThreadID(ctx, name, cmd.Process.Pid, onConflict)
+			if codexDaemon != nil {
+				go trackSessionThreadID(ctx, name, provider, cmd.Process.Pid, codexDaemon.observer.current, onConflict)
+			} else {
+				go trackCodexThreadID(ctx, name, cmd.Process.Pid, onConflict)
+			}
 		} else {
 			go trackGrokSessionID(ctx, name, cmd.Process.Pid, onConflict)
 		}

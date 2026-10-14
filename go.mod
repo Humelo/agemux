@@ -9,8 +9,12 @@ require (
 )
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/mattn/go-runewidth v0.0.19
 	golang.org/x/sys v0.40.0
 )
 
-require github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+require (
+	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
+)
