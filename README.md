@@ -13,25 +13,25 @@ The implementation is written in Go and ships as standalone binaries.
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.28/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.29/scripts/install.sh | bash
 ```
 
 Install and make bare `claude` use the selected Claude account:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.28/scripts/install.sh | bash -s -- --install-claude-shim
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.29/scripts/install.sh | bash -s -- --install-claude-shim
 ```
 
 Optionally install or upgrade the companion `codex-lb` tool through `uv`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.28/scripts/install.sh | bash -s -- --with-codex-lb
+curl -fsSL https://raw.githubusercontent.com/Humelo/agemux/v0.1.29/scripts/install.sh | bash -s -- --with-codex-lb
 ```
 
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.28/scripts/install.ps1 -UseB | iex
+iwr https://raw.githubusercontent.com/Humelo/agemux/v0.1.29/scripts/install.ps1 -UseB | iex
 ```
 
 On native Windows, Claude account management is supported. Persistent Agent Multiplexer sessions require POSIX PTY support and `shpool`, so use them from WSL, Linux, or macOS.
@@ -280,6 +280,8 @@ prompt/output traffic, and retains only bounded identity metadata. Existing
 permission CLI overrides are translated into supported thread RPC fields when
 using the remote daemon transport. It does not send
 prompts, inject status commands, or inspect another window's conversations.
+Picker and chat connections may overlap; each has its own upstream connection
+and request-ID namespace. Closing a picker does not interrupt the chat.
 The existing daemon is reused without restarting it. Per-session Codex config
 overrides are preserved. Legacy CLIs continue to use direct rollout discovery.
 

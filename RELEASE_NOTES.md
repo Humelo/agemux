@@ -1,4 +1,15 @@
-# Agent Multiplexer v0.1.28
+# Agent Multiplexer v0.1.29
+
+Fix HTTP 409 conflicts when resuming a Codex session from the picker.
+
+- Allow the picker connection to finish while the resumed chat opens its own
+  connection. Existing connections are preserved rather than evicted.
+- Scope observed RPC IDs to their connection so overlapping clients cannot
+  confuse transcript identity; an old disconnect clears only its own requests.
+- Preserve existing processes, daemon, permissions and conversation traffic.
+  The fix applies to newly launched runners; no daemon restart is needed.
+
+## v0.1.28
 
 Track the exact Codex thread when the TUI uses a shared local background server.
 

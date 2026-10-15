@@ -28,15 +28,42 @@ import (
 // the relay never injects prompts or terminal keys.
 const codexIdentityPrefixLimit = 1024 * 1024
 
-type codexIdentityObserver struct {
-	mu      sync.Mutex
-	next    uint64
-	applied uint64
-	pending map[string]uint64
-	thread  string
+// RPC IDs are scoped to a WebSocket. The picker and chat connections can
+// overlap and both begin at the same numeric ID.
+type codexRequestKey struct {
+	connection uint64
+	id         string
 }
 
-func (o *codexIdentityObserver) request(data []byte) {
+type codexIdentityObserver struct {
+	mu         sync.Mutex
+	next       uint64
+	applied    uint64
+	pending    map[codexRequestKey]uint64
+	thread     string
+	connection uint64
+}
+
+func (o *codexIdentityObserver) request(data []byte) { o.requestOn(0, data) }
+
+func (o *codexIdentityObserver) connect() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.connection++
+	return o.connection
+}
+
+func (o *codexIdentityObserver) disconnect(connection uint64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for key := range o.pending {
+		if key.connection == connection {
+			delete(o.pending, key)
+		}
+	}
+}
+
+func (o *codexIdentityObserver) requestOn(connection uint64, data []byte) {
 	var req struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -50,14 +77,14 @@ func (o *codexIdentityObserver) request(data []byte) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.pending == nil {
-		o.pending = make(map[string]uint64)
+		o.pending = make(map[codexRequestKey]uint64)
 	}
 	// Bound an unresponsive client's metadata without touching its transport.
 	if len(o.pending) >= 128 {
 		clear(o.pending)
 	}
 	o.next++
-	o.pending[string(req.ID)] = o.next
+	o.pending[codexRequestKey{connection, string(req.ID)}] = o.next
 }
 
 // Codex puts response id and thread identity before history. Read only that
@@ -144,15 +171,18 @@ func codexResponseIdentity(prefix []byte) (requestID, threadID string) {
 	return requestID, ""
 }
 
-func (o *codexIdentityObserver) response(prefix []byte) {
+func (o *codexIdentityObserver) response(prefix []byte) { o.responseOn(0, prefix) }
+
+func (o *codexIdentityObserver) responseOn(connection uint64, prefix []byte) {
 	id, thread := codexResponseIdentity(prefix)
 	if id == "" {
 		return
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	sequence, ok := o.pending[id]
-	delete(o.pending, id)
+	key := codexRequestKey{connection, id}
+	sequence, ok := o.pending[key]
+	delete(o.pending, key)
 	if ok && thread != "" && sequence > o.applied {
 		o.thread, o.applied = thread, sequence
 	}
@@ -174,16 +204,15 @@ func (p *prefixCapture) Write(data []byte) (int, error) {
 }
 
 type codexDaemonBridge struct {
-	observer     codexIdentityObserver
-	endpoint     string
-	dir          string
-	server       *http.Server
-	mu           sync.Mutex
-	active       map[*websocket.Conn]bool
-	closed       bool
-	clientActive bool
-	permissions  []codexConfigAssignment
-	fullAccess   bool
+	observer    codexIdentityObserver
+	endpoint    string
+	dir         string
+	server      *http.Server
+	mu          sync.Mutex
+	active      map[*websocket.Conn]bool
+	closed      bool
+	permissions []codexConfigAssignment
+	fullAccess  bool
 }
 
 type codexConfigAssignment struct {
@@ -345,21 +374,17 @@ func newCodexDaemonBridge(upstream string) (*codexDaemonBridge, error) {
 			return
 		}
 		b.mu.Lock()
-		if b.closed || b.clientActive {
-			b.mu.Unlock()
-			http.Error(w, "client already connected", http.StatusConflict)
+		closed := b.closed
+		b.mu.Unlock()
+		if closed {
+			http.Error(w, "relay is closed", http.StatusServiceUnavailable)
 			return
 		}
-		b.clientActive = true
-		b.mu.Unlock()
-		defer func() {
-			b.observer.mu.Lock()
-			clear(b.observer.pending)
-			b.observer.mu.Unlock()
-			b.mu.Lock()
-			b.clientActive = false
-			b.mu.Unlock()
-		}()
+		// Codex's picker loader shuts down asynchronously. A resumed chat (and
+		// in-session pickers) can connect while an older socket is still alive.
+		// Keep independent upstream connections; never evict the current one.
+		connection := b.observer.connect()
+		defer b.observer.disconnect(connection)
 		dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second, NetDialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", upstream)
 		}}
@@ -383,11 +408,11 @@ func newCodexDaemonBridge(upstream string) (*codexDaemonBridge, error) {
 		defer b.unregister(client)
 		done := make(chan struct{}, 1)
 		go func() {
-			relayCodexRequests(remote, client, &b.observer, b.permissionRequest)
+			relayCodexRequests(remote, client, func(data []byte) { b.observer.requestOn(connection, data) }, b.permissionRequest)
 			done <- struct{}{}
 			_ = remote.Close()
 		}()
-		relayCodexRPC(client, remote, b.observer.response)
+		relayCodexRPC(client, remote, func(data []byte) { b.observer.responseOn(connection, data) })
 		_ = client.Close()
 		_ = remote.Close()
 		<-done
@@ -396,7 +421,7 @@ func newCodexDaemonBridge(upstream string) (*codexDaemonBridge, error) {
 	return b, nil
 }
 
-func relayCodexRequests(dst, src *websocket.Conn, observer *codexIdentityObserver, transform func([]byte) ([]byte, error)) {
+func relayCodexRequests(dst, src *websocket.Conn, observe func([]byte), transform func([]byte) ([]byte, error)) {
 	for {
 		kind, reader, err := src.NextReader()
 		if err != nil {
@@ -411,7 +436,7 @@ func relayCodexRequests(dst, src *websocket.Conn, observer *codexIdentityObserve
 			if err != nil {
 				return
 			}
-			observer.request(prefix)
+			observe(prefix)
 		} else if kind == websocket.TextMessage {
 			// Large prompt/image messages stream unchanged. Oversized or unknown
 			// launch metadata must not silently lose permission settings.

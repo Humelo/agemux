@@ -308,7 +308,7 @@ func TestCodexRelayDisconnectReleasesBackpressuredConnection(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		proxy.mu.Lock()
-		active := proxy.clientActive
+		active := len(proxy.active) != 0
 		proxy.mu.Unlock()
 		if !active {
 			<-writeDone
@@ -316,7 +316,7 @@ func TestCodexRelayDisconnectReleasesBackpressuredConnection(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("closed client left upstream writer and reconnection gate stuck")
+	t.Fatal("closed client left upstream writer and sockets stuck")
 }
 
 func TestCodexRemotePermissionsPreserveAuthorizedCLISettings(t *testing.T) {
@@ -424,6 +424,127 @@ func TestCodexPermissionAssignmentsReplaceTablesInOrder(t *testing.T) {
 			if config["permissions"].(map[string]any)["custom"].(map[string]any)["extends"] != ":workspace" {
 				t.Fatal(config)
 			}
+		}
+	}
+}
+
+func TestCodexIdentitySeparatesConnectionsAndDisconnectCleanup(t *testing.T) {
+	var o codexIdentityObserver
+	old, next := o.connect(), o.connect()
+	o.requestOn(old, []byte(`{"id":1,"method":"thread/resume"}`))
+	// The new connection's read response cannot satisfy an older connection's resume.
+	o.responseOn(next, daemonReply(1, daemonTestRoot, "null"))
+	if o.current() != "" {
+		t.Fatal("request IDs crossed connection boundaries")
+	}
+	o.requestOn(next, []byte(`{"id":1,"method":"thread/resume"}`))
+	o.responseOn(next, daemonReply(1, daemonTestNext, "null"))
+	o.responseOn(old, daemonReply(1, daemonTestRoot, "null"))
+	if o.current() != daemonTestNext {
+		t.Fatal("older connection overwrote newer selection")
+	}
+	o.requestOn(next, []byte(`{"id":2,"method":"thread/fork"}`))
+	o.requestOn(old, []byte(`{"id":2,"method":"thread/resume"}`))
+	o.disconnect(old)
+	o.responseOn(old, daemonReply(2, daemonTestNext, "null"))
+	o.responseOn(next, daemonReply(2, daemonTestRoot, "null"))
+	if o.current() != daemonTestRoot || len(o.pending) != 0 {
+		t.Fatal("disconnect erased another connection's request")
+	}
+}
+
+func TestCodexDaemonAllowsOverlappingPickerAndChatConnections(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "agx-overlap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	upstream := filepath.Join(dir, "up.sock")
+	ln, err := net.Listen("unix", upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each socket gets its own server-side request namespace, just like Codex.
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			kind, raw, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID     int    `json:"id"`
+				Method string `json:"method"`
+				Params struct {
+					Thread string `json:"threadId"`
+				} `json:"params"`
+			}
+			if json.Unmarshal(raw, &req) == nil && req.Method == "thread/resume" {
+				raw = daemonReply(req.ID, req.Params.Thread, "null")
+			}
+			if c.WriteMessage(kind, raw) != nil {
+				return
+			}
+		}
+	})}
+	go server.Serve(ln)
+	defer server.Close()
+	proxy, err := newCodexDaemonBridge(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.stop()
+	dialer := websocket.Dialer{HandshakeTimeout: time.Second, NetDialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", strings.TrimPrefix(proxy.endpoint, "unix://"))
+	}}
+	connect := func() *websocket.Conn {
+		t.Helper()
+		c, response, err := dialer.Dial("ws://localhost/", nil)
+		if err != nil {
+			t.Fatalf("overlapping connection rejected: %v (%v)", err, response)
+		}
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		return c
+	}
+	echo := func(c *websocket.Conn, raw string) {
+		t.Helper()
+		if err := c.WriteMessage(websocket.TextMessage, []byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+		_, got, err := c.ReadMessage()
+		if err != nil || string(got) != raw {
+			t.Fatal("connection interrupted or cross-wired", err)
+		}
+	}
+	picker := connect()
+	defer picker.Close()
+	echo(picker, `{"id":1,"method":"thread/list"}`)
+	chat := connect()
+	defer chat.Close()
+	if err := chat.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"id":1,"method":"thread/resume","params":{"threadId":%q}}`, daemonTestRoot))); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := chat.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+	if proxy.observer.current() != daemonTestRoot {
+		t.Fatal("chat resume not discovered")
+	}
+	echo(picker, `{"id":2,"method":"thread/read"}`) // New connection must not evict old picker.
+	picker.Close()
+	replacement := connect()
+	defer replacement.Close() // No sleep between close and reconnect.
+	echo(replacement, `{"id":1,"method":"thread/list"}`)
+	echo(chat, `{"id":2,"method":"account/read"}`) // Old picker cleanup must not close chat.
+	proxy.stop()
+	for _, c := range []*websocket.Conn{chat, replacement} {
+		if _, _, err := c.ReadMessage(); err == nil {
+			t.Fatal("stop left an overlapping client alive")
 		}
 	}
 }
