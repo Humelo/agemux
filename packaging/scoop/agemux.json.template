@@ -1,10 +1,10 @@
 {
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "Persistent Codex, Claude, and Grok sessions with built-in account views",
   "homepage": "https://github.com/Humelo/agemux",
   "license": "MIT",
-  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.28/agemux_0.1.28_windows_amd64.zip",
-  "hash": "a4959756da0f60f6fdf1816e4e6e2a35b6ef98da3cef37c915f68ab0bbc1cff5",
+  "url": "https://github.com/Humelo/agemux/releases/download/v0.1.29/agemux_0.1.29_windows_amd64.zip",
+  "hash": "36c051936d7baba2f3027304017e037529cade4eeaa2efe7ed2de0bece0d9930",
   "bin": [
     [
       "agemux.exe",

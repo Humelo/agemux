@@ -1,8 +1,8 @@
 class Agemux < Formula
   desc "Persistent Codex, Claude, and Grok sessions with built-in account views"
   homepage "https://github.com/Humelo/agemux"
-  url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.28.tar.gz"
-  sha256 "36581d140e4a736f3570c01f055c08949d6e5e36d7ec28651e4730eafd2de2d4"
+  url "https://github.com/Humelo/agemux/archive/refs/tags/v0.1.29.tar.gz"
+  sha256 "9c826e203bb1581474fec212e373adb07763ac92b56dcb4a45cd27ef97899538"
   license "MIT"
 
   depends_on "go" => :build
@@ -14,6 +14,6 @@ class Agemux < Formula
 
   test do
     assert_match "agemux", shell_output("#{bin}/agemux --help")
-    assert_match "Claude accounts 0.1.28", shell_output("#{bin}/agemux claude-accounts version")
+    assert_match "Claude accounts 0.1.29", shell_output("#{bin}/agemux claude-accounts version")
   end
 end
